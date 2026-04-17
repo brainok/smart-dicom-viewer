@@ -244,6 +244,21 @@ class PanelState: ObservableObject, Identifiable {
     @Published var rulerPreviewEnd: CGPoint? = nil
     @Published var anglePreviewPoints: [CGPoint] = []
 
+    // Multi-frame / Cine state
+    @Published var isMultiFrame: Bool = false
+    @Published var numberOfFrames: Int = 0
+    @Published var currentFrameIndex: Int = 0
+    @Published var isPlaying: Bool = false
+    @Published var playbackSpeed: Double = 1.0
+    @Published var cineRate: Double = 30.0
+    @Published var frameTimeMs: Double = 33.33
+    @Published var loopPlayback: Bool = true
+
+    /// Internal frame counter updated every tick (not @Published, no SwiftUI cascade)
+    var cineInternalFrame: Int = 0
+    /// Weak reference to the NSView for direct cine frame rendering (bypasses SwiftUI)
+    weak var cineDisplayView: NSView?
+
     /// Reset panel to empty state
     func reset() {
         seriesIndex = -1
@@ -300,5 +315,15 @@ class PanelState: ObservableObject, Identifiable {
         rulerPreviewStart = nil
         rulerPreviewEnd = nil
         anglePreviewPoints = []
+        isMultiFrame = false
+        numberOfFrames = 0
+        currentFrameIndex = 0
+        isPlaying = false
+        playbackSpeed = 1.0
+        cineRate = 30.0
+        frameTimeMs = 33.33
+        loopPlayback = true
+        cineInternalFrame = 0
+        cineDisplayView = nil
     }
 }

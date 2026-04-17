@@ -141,12 +141,17 @@ struct PanelView: View {
                 }
             }
 
-            // Volume mode toolbar (top-left)
+            // Top toolbar (Volume or Cine)
             if panel.seriesIndex >= 0 && panel.image != nil {
                 VStack {
                     HStack {
-                        VolumeToolbar(model: model, panel: panel)
-                            .padding(6)
+                        if panel.isMultiFrame && panel.numberOfFrames > 1 {
+                            CineToolbar(model: model, panel: panel)
+                                .padding(6)
+                        } else {
+                            VolumeToolbar(model: model, panel: panel)
+                                .padding(6)
+                        }
                         Spacer()
                     }
                     Spacer()
@@ -324,12 +329,16 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         let view = PanelDICOMInteractView()
         view.model = model
         view.panel = panel
+        panel.cineDisplayView = view
         return view
     }
 
     func updateNSView(_ nsView: PanelDICOMInteractView, context: Context) {
         nsView.model = model
         nsView.panel = panel
+        // During cine playback, frames are rendered directly via setCineFrame
+        // on the CALayer. Skip the expensive SwiftUI image pipeline.
+        guard !panel.isPlaying else { return }
         nsView.setImage(image)
         nsView.applyFilters()
         nsView.updateTransform()
@@ -465,6 +474,12 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                     self.restoreState()
                 }
             }
+        }
+
+        /// Set a CGImage directly on the layer for high-performance cine playback.
+        /// Bypasses NSImageView.image and SwiftUI update cycle entirely.
+        func setCineFrame(_ cgImage: CGImage) {
+            imageView.layer?.contents = cgImage
         }
 
         func updateTransform() { restoreState() }

@@ -253,6 +253,14 @@ struct ContentView: View {
                 }
             }
 
+            // Space = Toggle cine playback
+            if press.key == .space {
+                if let panel = model.activePanel, panel.isMultiFrame && panel.numberOfFrames > 1 {
+                    model.toggleCinePlayback(panel)
+                    return .handled
+                }
+            }
+
             // Escape = Clear group selection
             if press.key == .escape {
                 if model.groupSelectedPanels.count > 0 {
@@ -446,6 +454,13 @@ struct SeriesRow: View {
         model.panels.contains { $0.seriesIndex == seriesIndex }
     }
 
+    private var seriesCountLabel: String {
+        if series.images.count == 1, let nf = series.images.first?.numberOfFrames, nf > 1 {
+            return "\(nf) Frames"
+        }
+        return "\(series.images.count) Images"
+    }
+
     var body: some View {
         HStack {
             Group {
@@ -473,7 +488,7 @@ struct SeriesRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("\(series.images.count) Images")
+                Text(seriesCountLabel)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

@@ -140,15 +140,29 @@ class SimpleDicomParser {
                  }
              }
              
+            // Early stop: peek at next tag to avoid reading massive pixel data
+            // elements (multi-frame files can have 2GB+ encapsulated pixel data)
+            if stopAtPixelData && offset + 4 <= data.count {
+                var peekG: UInt16 = 0
+                var peekE: UInt16 = 0
+                _ = withUnsafeMutableBytes(of: &peekG) { data.copyBytes(to: $0, from: offset..<offset+2) }
+                _ = withUnsafeMutableBytes(of: &peekE) { data.copyBytes(to: $0, from: (offset+2)..<(offset+4)) }
+                peekG = isLittleEndian ? peekG.littleEndian : peekG.bigEndian
+                peekE = isLittleEndian ? peekE.littleEndian : peekE.bigEndian
+                if peekG == 0x7FE0 && peekE == 0x0010 {
+                    return (elements, nil, transferSyntaxUID)
+                }
+            }
+
             do {
                 let element = try parseElement()
                 elements.append(element)
-                
+
                 if element.tag == DicomTag(group: 0x0002, element: 0x0010) {
                  transferSyntaxUID = element.stringValue
                  if debugMode { print("Transfer Syntax: \(transferSyntaxUID ?? "nil")") }
              }
-             
+
              if element.tag == DicomTag(group: 0x7FE0, element: 0x0010) {
                  if debugMode { print("Pixel Data Found! Length: \(element.length)") }
                  pixelData = element.data
@@ -319,7 +333,7 @@ class SimpleDicomParser {
         // Optimization: Start searching after meta header (132 + 128?)
         var searchIdx = 132
         
-        while searchIdx < data.count - 8 {
+        while searchIdx < min(data.count, 65_536) - 8 {
             if data[searchIdx] == targetBytes[0] &&
                data[searchIdx+1] == targetBytes[1] &&
                data[searchIdx+2] == targetBytes[2] &&
