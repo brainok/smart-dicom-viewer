@@ -337,10 +337,12 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         nsView.model = model
         nsView.panel = panel
         // During cine playback, frames are rendered directly via setCineFrame
-        // on the CALayer. Skip the expensive SwiftUI image pipeline.
-        guard !panel.isPlaying else { return }
-        nsView.setImage(image)
-        nsView.applyFilters()
+        // on the CALayer. Skip the expensive SwiftUI image pipeline but still
+        // apply the CALayer transform (zoom/pan) so W/L and navigation work.
+        if !panel.isPlaying {
+            nsView.setImage(image)
+            nsView.applyFilters()
+        }
         nsView.updateTransform()
         nsView.updateROICursor()
     }
@@ -599,7 +601,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         /// Convert a window-space NSEvent location to image pixel coordinates.
         /// Returns nil if the position is outside the image bounds.
         private func screenToPixel(_ event: NSEvent) -> CGPoint? {
-            guard let panel = panel, let layer = imageView.layer, let image = imageView.image else { return nil }
+            guard let _ = panel, let layer = imageView.layer, let image = imageView.image else { return nil }
 
             let loc = convert(event.locationInWindow, from: nil)
 
@@ -1159,6 +1161,11 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 let row = SIMD3<Double>(iop[0], iop[1], iop[2])
                 let col = SIMD3<Double>(iop[3], iop[4], iop[5])
                 let origin = SIMD3<Double>(ipp.0, ipp.1, ipp.2)
+                // DICOM PixelSpacing = (row_spacing, col_spacing) where row_spacing is
+                // the distance between rows (i.e. spacing in the column/Y direction)
+                // and col_spacing is the distance between columns (row/X direction).
+                // So: px (column index) * col_spacing (ps.1) * row_dir,
+                //     py (row index) * row_spacing (ps.0) * col_dir.
                 let patPos = origin + Double(px) * ps.1 * row + Double(py) * ps.0 * col
                 panel.cursorPatientX = patPos.x
                 panel.cursorPatientY = patPos.y
