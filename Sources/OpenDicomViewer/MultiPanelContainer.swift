@@ -696,18 +696,9 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         /// Convert a window-space NSEvent location to image pixel coordinates.
         /// Returns nil if the position is outside the image bounds.
         private func screenToPixel(_ event: NSEvent) -> CGPoint? {
-            guard let _ = panel, let layer = imageView.layer, let image = imageView.image else { return nil }
+            guard let panel = panel, let image = imageView.image else { return nil }
 
             let loc = convert(event.locationInWindow, from: nil)
-
-            let scale = layer.transform.m11
-            let tx = layer.transform.m41
-            let ty = layer.transform.m42
-            let centerX = bounds.width / 2
-            let centerY = bounds.height / 2
-
-            let localX = (loc.x - CGFloat(tx) - centerX) / CGFloat(scale) + centerX
-            let localY = (loc.y - CGFloat(ty) - centerY) / CGFloat(scale) + centerY
 
             let viewW = bounds.width
             let viewH = bounds.height
@@ -720,8 +711,37 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             let offsetX = (viewW - displayW) / 2
             let offsetY = (viewH - displayH) / 2
 
-            let pixelX = (localX - offsetX) / fitScale
-            let pixelY = imgH - (localY - offsetY) / fitScale  // Flip Y
+            let cx = viewW / 2
+            let cy = viewH / 2
+
+            // Convert NSView Y-up to image Y-down
+            var x = loc.x
+            var y = viewH - loc.y
+
+            // Undo pan (translation is screen-space; Y was inverted in pixelToScreen)
+            x -= panel.translation.x
+            y += panel.translation.y
+
+            // Undo zoom (center-relative)
+            x = (x - cx) / panel.scale + cx
+            y = (y - cy) / panel.scale + cy
+
+            // Undo rotation (center-relative, negative angle to reverse)
+            let angle = -CGFloat(panel.rotationSteps) * .pi / 2.0
+            let dx = x - cx
+            let dy = y - cy
+            let cosA = cos(angle)
+            let sinA = sin(angle)
+            x = dx * cosA - dy * sinA + cx
+            y = dx * sinA + dy * cosA + cy
+
+            // Undo flip (center-relative)
+            if panel.isFlippedH { x = 2 * cx - x }
+            if panel.isFlippedV { y = 2 * cy - y }
+
+            // Convert from view space to pixel space
+            let pixelX = (x - offsetX) / fitScale
+            let pixelY = (y - offsetY) / fitScale
 
             guard pixelX.isFinite, pixelY.isFinite else { return nil }
             return CGPoint(x: pixelX, y: pixelY)
@@ -1210,7 +1230,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         }
 
         override func mouseMoved(with event: NSEvent) {
-            guard let panel = panel, let layer = imageView.layer, let image = imageView.image else {
+            guard let panel = panel, imageView.image != nil else {
                 panel?.showCursorInfo = false
                 return
             }
@@ -1231,32 +1251,13 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 }
             }
 
-            let loc = convert(event.locationInWindow, from: nil)
-
-            // Undo CALayer transform (zoom/pan with anchor at center)
-            let scale = layer.transform.m11
-            let tx = layer.transform.m41
-            let ty = layer.transform.m42
-            let centerX = bounds.width / 2
-            let centerY = bounds.height / 2
-
-            let localX = (loc.x - CGFloat(tx) - centerX) / CGFloat(scale) + centerX
-            let localY = (loc.y - CGFloat(ty) - centerY) / CGFloat(scale) + centerY
-
-            // Convert from view coordinates to image pixel coordinates
-            let viewW = bounds.width
-            let viewH = bounds.height
-            let imgW = image.size.width
-            let imgH = image.size.height
-
-            let fitScale = min(viewW / imgW, viewH / imgH)
-            let displayW = imgW * fitScale
-            let displayH = imgH * fitScale
-            let offsetX = (viewW - displayW) / 2
-            let offsetY = (viewH - displayH) / 2
-
-            let pixelX = (localX - offsetX) / fitScale
-            let pixelY = imgH - (localY - offsetY) / fitScale  // Flip Y
+            // Use screenToPixel for HU readout coordinate mapping
+            guard let pixelPoint = screenToPixel(event) else {
+                panel.showCursorInfo = false
+                return
+            }
+            let pixelX = pixelPoint.x
+            let pixelY = pixelPoint.y
 
             // Safe Double→Int conversion (pixelX/Y can be NaN/Inf with degenerate transforms)
             guard pixelX.isFinite, pixelY.isFinite else {
@@ -1380,7 +1381,7 @@ struct ROIOverlay: View {
 
         let steps = panel.rotationSteps % 4
         if steps > 0 {
-            let angle = CGFloat(steps) * .pi / 2
+            let angle = -CGFloat(steps) * .pi / 2
             let cosA = cos(angle)
             let sinA = sin(angle)
             let rx = x * cosA - y * sinA
@@ -1948,7 +1949,7 @@ struct AnnotationOverlay: View {
 
         let steps = panel.rotationSteps % 4
         if steps > 0 {
-            let angle = CGFloat(steps) * .pi / 2
+            let angle = -CGFloat(steps) * .pi / 2
             let cosA = cos(angle)
             let sinA = sin(angle)
             let rx = x * cosA - y * sinA

@@ -39,6 +39,8 @@ class MultiFrameDecoder {
 
     private let mappedData: Data
     private var frameTable: [(offset: Int, length: Int)] = []
+    private let isEncapsulated: Bool
+    private let isSigned: Bool
     private let frameCache = NSCache<NSNumber, NSImage>()
     private let prefetchQueue = DispatchQueue(label: "com.opendicomviewer.framePrefetch", qos: .userInitiated)
 
@@ -90,9 +92,21 @@ class MultiFrameDecoder {
         self.bitsAllocated  = getInt(0x0028, 0x0100) ?? 8
         self.samplesPerPixel = getInt(0x0028, 0x0002) ?? 1
 
+        // PixelRepresentation (0028,0103): 0 = unsigned, 1 = signed
+        self.isSigned = (getInt(0x0028, 0x0103) ?? 0) == 1
+
         // PhotometricInterpretation (0028,0004)
         let photo = getStr(0x0028, 0x0004) ?? ""
         self.isColor = photo.contains("RGB") || photo.contains("YBR")
+
+        // Transfer Syntax UID (0002,0010) - determines encapsulated vs raw layout
+        let transferSyntax = getStr(0x0002, 0x0010)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let uncompressedUIDs: Set<String> = [
+            "1.2.840.10008.1.2",    // Implicit VR Little Endian
+            "1.2.840.10008.1.2.1",  // Explicit VR Little Endian
+            "1.2.840.10008.1.2.2",  // Explicit VR Big Endian
+        ]
+        self.isEncapsulated = !uncompressedUIDs.contains(transferSyntax)
 
         // Timing: CineRate (0018,0040) IS, FrameTime (0018,1063) DS (ms/frame)
         // Prefer FrameTime; fall back to CineRate; default 30 fps
@@ -113,12 +127,29 @@ class MultiFrameDecoder {
             self.frameTimeMs = 1000.0 / rawCineRate
         }
 
-        // 3. Find PixelData tag and parse encapsulated frame items
+        // 3. Find PixelData tag and parse frame table
         let parseStart = CFAbsoluteTimeGetCurrent()
         var table: [(offset: Int, length: Int)] = []
-        guard MultiFrameDecoder.findPixelDataAndParseFrames(data: data, frameTable: &table, pixelDataTagOffset: pixelDataOffset, fileURL: url) else {
-            cineLog("DECODER findPixelDataAndParseFrames FAILED for \(url.lastPathComponent)")
-            return nil
+        if isEncapsulated {
+            guard MultiFrameDecoder.findPixelDataAndParseFrames(data: data, frameTable: &table, pixelDataTagOffset: pixelDataOffset, fileURL: url) else {
+                cineLog("DECODER findPixelDataAndParseFrames FAILED for \(url.lastPathComponent)")
+                return nil
+            }
+        } else {
+            MultiFrameDecoder.buildRawFrameTable(
+                data: data,
+                frameTable: &table,
+                pixelDataTagOffset: pixelDataOffset,
+                numberOfFrames: nf,
+                frameWidth: frameWidth,
+                frameHeight: frameHeight,
+                bitsAllocated: bitsAllocated,
+                samplesPerPixel: samplesPerPixel
+            )
+            guard !table.isEmpty else {
+                cineLog("DECODER buildRawFrameTable FAILED for \(url.lastPathComponent)")
+                return nil
+            }
         }
         cineLog("DECODER Frame table built: \(table.count) frames in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - parseStart))s for \(url.lastPathComponent)")
 
@@ -148,10 +179,17 @@ class MultiFrameDecoder {
         let entry = frameTable[index]
         guard entry.offset >= 0 && entry.offset + entry.length <= mappedData.count else { return nil }
 
-        // Zero-copy slice into memory-mapped data
-        let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
-        guard let image = NSImage(data: frameData) else { return nil }
+        let image: NSImage?
+        if isEncapsulated {
+            // Zero-copy slice into memory-mapped data — JPEG/compressed
+            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
+            image = NSImage(data: frameData)
+        } else {
+            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
+            image = renderRawFrame(frameData)
+        }
 
+        guard let image = image else { return nil }
         frameCache.setObject(image, forKey: key)
         return image
     }
@@ -162,6 +200,11 @@ class MultiFrameDecoder {
 
         let entry = frameTable[index]
         guard entry.offset >= 0 && entry.offset + entry.length <= mappedData.count else { return nil }
+
+        if !isEncapsulated {
+            let frameData = mappedData[entry.offset..<(entry.offset + entry.length)]
+            return renderRawFrame(frameData)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
 
         let frameData = mappedData[entry.offset..<(entry.offset + entry.length)] as NSData
         guard let source = CGImageSourceCreateWithData(frameData, nil) else { return nil }
@@ -282,6 +325,172 @@ class MultiFrameDecoder {
                 Thread.sleep(forTimeInterval: 0.005)
             }
         }
+    }
+
+    // MARK: - Raw (Uncompressed) Frame Support
+
+    /// Build a frame offset table for uncompressed multi-frame pixel data.
+    /// Raw pixel data is a contiguous blob; each frame is exactly frameSize bytes.
+    private static func buildRawFrameTable(
+        data: Data,
+        frameTable: inout [(offset: Int, length: Int)],
+        pixelDataTagOffset: Int,
+        numberOfFrames: Int,
+        frameWidth: Int,
+        frameHeight: Int,
+        bitsAllocated: Int,
+        samplesPerPixel: Int
+    ) {
+        guard pixelDataTagOffset >= 0 else { return }
+        guard frameWidth > 0, frameHeight > 0, bitsAllocated > 0, samplesPerPixel > 0 else { return }
+
+        let bytesPerSample = max(1, bitsAllocated / 8)
+        let frameSize = frameWidth * frameHeight * bytesPerSample * samplesPerPixel
+        guard frameSize > 0 else { return }
+
+        // Advance past tag (4 bytes), then VR/length header
+        var pixelDataStart = pixelDataTagOffset + 4
+        data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            guard pixelDataStart + 2 <= data.count else { return }
+            let vr0 = base[pixelDataStart]
+            let vr1 = base[pixelDataStart + 1]
+            // Explicit VR OB or OW: VR(2) + reserved(2) + 32-bit length(4) = 8 bytes
+            if vr0 == 0x4F && (vr1 == 0x42 || vr1 == 0x57) {
+                pixelDataStart += 8
+            } else {
+                // Implicit VR: 32-bit length only (4 bytes)
+                pixelDataStart += 4
+            }
+        }
+
+        for i in 0..<numberOfFrames {
+            let offset = pixelDataStart + i * frameSize
+            let end = offset + frameSize
+            guard end <= data.count else { break }
+            frameTable.append((offset: offset, length: frameSize))
+        }
+    }
+
+    /// Render raw (uncompressed) pixel bytes to an NSImage using auto window/level.
+    private func renderRawFrame(_ frameData: Data) -> NSImage? {
+        guard frameWidth > 0, frameHeight > 0 else { return nil }
+
+        let totalPixels = frameWidth * frameHeight
+
+        // RGB path
+        if samplesPerPixel == 3 {
+            let totalBytes = totalPixels * 3
+            guard frameData.count >= totalBytes else { return nil }
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard let provider = CGDataProvider(data: frameData as CFData) else { return nil }
+            guard let cgImg = CGImage(
+                width: frameWidth, height: frameHeight,
+                bitsPerComponent: 8, bitsPerPixel: 24,
+                bytesPerRow: frameWidth * 3,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider, decode: nil,
+                shouldInterpolate: true, intent: .defaultIntent
+            ) else { return nil }
+            return NSImage(cgImage: cgImg, size: NSSize(width: frameWidth, height: frameHeight))
+        }
+
+        // Grayscale path — compute auto window/level from this frame's pixels
+        let (minVal, maxVal) = computeRawMinMax(data: frameData)
+        let ww = max(maxVal - minVal, 1.0)
+        let wc = minVal + ww / 2.0
+        let windowBottom = wc - ww / 2.0
+
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        guard let context = CGContext(
+            data: nil,
+            width: frameWidth, height: frameHeight,
+            bitsPerComponent: 8, bytesPerRow: frameWidth,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        guard let destData = context.data else { return nil }
+        let destBuffer = destData.bindMemory(to: UInt8.self, capacity: totalPixels)
+
+        if bitsAllocated > 16 {
+            // 32-bit pixels
+            frameData.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
+                guard frameData.count >= totalPixels * 4 else { return }
+                for i in 0..<totalPixels {
+                    let val: Double = isSigned ? Double(Int32(bitPattern: ptr[i])) : Double(ptr[i])
+                    let norm = (val - windowBottom) / ww * 255.0
+                    destBuffer[i] = UInt8(max(0, min(255, norm)))
+                }
+            }
+        } else if bitsAllocated > 8 {
+            // 16-bit pixels
+            frameData.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) else { return }
+                guard frameData.count >= totalPixels * 2 else { return }
+                for i in 0..<totalPixels {
+                    let val: Double = isSigned ? Double(Int16(bitPattern: ptr[i])) : Double(ptr[i])
+                    let norm = (val - windowBottom) / ww * 255.0
+                    destBuffer[i] = UInt8(max(0, min(255, norm)))
+                }
+            }
+        } else {
+            // 8-bit pixels
+            frameData.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                for i in 0..<totalPixels {
+                    let val = Double(ptr[i])
+                    let norm = (val - windowBottom) / ww * 255.0
+                    destBuffer[i] = UInt8(max(0, min(255, norm)))
+                }
+            }
+        }
+
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: frameWidth, height: frameHeight))
+    }
+
+    /// Compute pixel min/max for auto window/level on a raw frame.
+    private func computeRawMinMax(data: Data) -> (Double, Double) {
+        var minVal = Double.greatestFiniteMagnitude
+        var maxVal = -Double.greatestFiniteMagnitude
+        let totalPixels = frameWidth * frameHeight
+
+        if bitsAllocated > 16 {
+            data.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt32.self) else { return }
+                let count = min(data.count / 4, totalPixels)
+                for i in 0..<count {
+                    let v: Double = isSigned ? Double(Int32(bitPattern: ptr[i])) : Double(ptr[i])
+                    if v < minVal { minVal = v }
+                    if v > maxVal { maxVal = v }
+                }
+            }
+        } else if bitsAllocated > 8 {
+            data.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt16.self) else { return }
+                let count = min(data.count / 2, totalPixels)
+                for i in 0..<count {
+                    let v: Double = isSigned ? Double(Int16(bitPattern: ptr[i])) : Double(ptr[i])
+                    if v < minVal { minVal = v }
+                    if v > maxVal { maxVal = v }
+                }
+            }
+        } else {
+            data.withUnsafeBytes { rawBuffer in
+                guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                let count = min(data.count, totalPixels)
+                for i in 0..<count {
+                    let v = Double(ptr[i])
+                    if v < minVal { minVal = v }
+                    if v > maxVal { maxVal = v }
+                }
+            }
+        }
+
+        if maxVal == minVal { maxVal = minVal + 1 }
+        return (minVal, maxVal)
     }
 
     // MARK: - Encapsulated Pixel Data Parser
