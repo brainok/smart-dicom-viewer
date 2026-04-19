@@ -1951,6 +1951,9 @@ class DICOMModel: ObservableObject {
                 // Check directory
                 if let resources = try? fileURL.resourceValues(forKeys: [.isDirectoryKey]), resources.isDirectory == true { continue }
                 
+                // Skip DICOMDIR files (directory index, not images)
+                if fileURL.lastPathComponent.uppercased() == "DICOMDIR" { continue }
+
                 // Check Extension
                 let ext = fileURL.pathExtension.lowercased()
                 if ext != "dcm" && ext != "" { continue }
@@ -2059,6 +2062,7 @@ class DICOMModel: ObservableObject {
                 "1.2.840.10008.3.1.2.3.3",         // Modality Performed Procedure Step
                 "1.2.840.10008.5.1.4.1.1.104.1",  // Encapsulated PDF
                 "1.2.840.10008.5.1.4.1.1.104.2",  // Encapsulated CDA
+                "1.2.840.10008.1.3.10",            // Media Storage Directory (DICOMDIR)
             ]
             let nonImageModalities: Set<String> = ["SR", "KO", "PR"]
 

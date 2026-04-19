@@ -14,10 +14,6 @@ __pycache__/
 *.pyc
 *.spec
 
-# Debug tools
-debug_tool
-debug_main.swift
-
 # macOS
 .DS_Store
 *.swp
@@ -35,6 +31,3 @@ DerivedData/
 # IDE
 .vscode/
 .idea/
-
-# OMC harness state
-.omc/
