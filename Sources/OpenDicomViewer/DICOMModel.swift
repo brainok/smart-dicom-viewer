@@ -1951,6 +1951,9 @@ class DICOMModel: ObservableObject {
                 // Check directory
                 if let resources = try? fileURL.resourceValues(forKeys: [.isDirectoryKey]), resources.isDirectory == true { continue }
                 
+                // Skip DICOMDIR files (directory index, not images)
+                if fileURL.lastPathComponent.uppercased() == "DICOMDIR" { continue }
+
                 // Check Extension
                 let ext = fileURL.pathExtension.lowercased()
                 if ext != "dcm" && ext != "" { continue }
@@ -2059,6 +2062,7 @@ class DICOMModel: ObservableObject {
                 "1.2.840.10008.3.1.2.3.3",         // Modality Performed Procedure Step
                 "1.2.840.10008.5.1.4.1.1.104.1",  // Encapsulated PDF
                 "1.2.840.10008.5.1.4.1.1.104.2",  // Encapsulated CDA
+                "1.2.840.10008.1.3.10",            // Media Storage Directory (DICOMDIR)
             ]
             let nonImageModalities: Set<String> = ["SR", "KO", "PR"]
 
@@ -3391,7 +3395,11 @@ class DICOMModel: ObservableObject {
     /// Auto W/L from a rectangular ROI in pixel coordinates
     func autoWindowLevelForPanelROI(_ panel: PanelState, rect: CGRect) {
         guard let data = panel.rawPixelData, panel.imageWidth > 0 else { return }
-        let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rect, isSigned: panel.isSigned, bits: panel.bitDepth)
+        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
+        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
+        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
+                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rawRect, isSigned: panel.isSigned, bits: panel.bitDepth)
         let newWW = max(1.0, maxVal - minVal)
         let newWC = minVal + (newWW / 2.0)
         adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
@@ -3402,10 +3410,15 @@ class DICOMModel: ObservableObject {
         guard let data = panel.rawPixelData else { return nil }
         let w = panel.imageWidth
         let h = panel.imageHeight
-        let minX = max(0, Int(rect.minX))
-        let minY = max(0, Int(rect.minY))
-        let maxX = min(w - 1, Int(rect.maxX))
-        let maxY = min(h - 1, Int(rect.maxY))
+        // Scale ROI rect from display-image space to raw-pixel space
+        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
+        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
+        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
+                             width: rect.width * scaleX, height: rect.height * scaleY)
+        let minX = max(0, Int(rawRect.minX))
+        let minY = max(0, Int(rawRect.minY))
+        let maxX = min(w - 1, Int(rawRect.maxX))
+        let maxY = min(h - 1, Int(rawRect.maxY))
         guard maxX > minX, maxY > minY else { return nil }
 
         var values: [Double] = []

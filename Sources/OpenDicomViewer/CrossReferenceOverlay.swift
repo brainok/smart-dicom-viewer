@@ -102,7 +102,7 @@ private struct CrossRefLineView: View {
         // Rotation (90° steps)
         let steps = displayPanel.rotationSteps % 4
         if steps > 0 {
-            let angle = CGFloat(steps) * .pi / 2
+            let angle = -CGFloat(steps) * .pi / 2
             let cosA = cos(angle)
             let sinA = sin(angle)
             let rx = x * cosA - y * sinA

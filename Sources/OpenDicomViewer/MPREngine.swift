@@ -151,7 +151,7 @@ struct VolumeBuilder {
 
         progress?(1.0)
 
-        let origin = sorted[0].0.imagePosition!
+        guard let origin = sorted[0].0.imagePosition else { throw VolumeBuilderError.missingSpatialMetadata }
 
         return VolumeData(
             voxels: buffer,
