@@ -11,6 +11,7 @@ private func imageContext(
 ) -> DicomImageContext {
     DicomImageContext(
         url: url,
+        sopInstanceUID: "1.2.826.0.1.3680043.10.99.1",
         seriesUID: seriesUID,
         seriesDescription: "test",
         instanceNumber: 1,

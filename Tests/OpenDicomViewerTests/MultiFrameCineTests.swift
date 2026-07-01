@@ -74,6 +74,7 @@ func s42FixtureGroupingProducesOneSeriesPerFile() throws {
         let nf = getInt(0x0028, 0x0008) ?? 1
         contexts.append(DicomImageContext(
             url: url,
+            sopInstanceUID: "1.2.826.0.1.3680043.10.99.\(contexts.count + 1)",
             seriesUID: seriesUID,
             seriesDescription: getStr(0x0008, 0x103E) ?? "No Description",
             instanceNumber: getInt(0x0020, 0x0013) ?? 0,

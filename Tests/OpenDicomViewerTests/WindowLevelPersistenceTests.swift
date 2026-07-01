@@ -71,6 +71,7 @@ func preservedWLRestoredFromSeriesStatesWhenPanelWindowWidthIsZero() {
     // Set up a minimal series so allSeries[seriesIndex].id == uid
     let ctx = DicomImageContext(
         url: URL(fileURLWithPath: "/tmp/fake.dcm"),
+        sopInstanceUID: "1.2.826.0.1.3680043.10.99.1",
         seriesUID: uid,
         seriesDescription: "test",
         instanceNumber: 1,
@@ -125,6 +126,7 @@ func preservedWLNotRestoredWhenSeriesStatesEmpty() {
 
     let ctx = DicomImageContext(
         url: URL(fileURLWithPath: "/tmp/fake2.dcm"),
+        sopInstanceUID: "1.2.826.0.1.3680043.10.99.2",
         seriesUID: uid,
         seriesDescription: "test",
         instanceNumber: 1,
@@ -172,6 +174,7 @@ func adjustWindowLevelPersistsToSeriesStates() {
 
     let ctx = DicomImageContext(
         url: URL(fileURLWithPath: "/tmp/fake3.dcm"),
+        sopInstanceUID: "1.2.826.0.1.3680043.10.99.3",
         seriesUID: uid,
         seriesDescription: "test",
         instanceNumber: 1,

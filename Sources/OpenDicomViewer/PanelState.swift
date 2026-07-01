@@ -238,6 +238,7 @@ class PanelState: ObservableObject, Identifiable {
 
     // Annotations
     @Published var annotations: [Annotation] = []
+    @Published var importedOverlays: [DICOMImportedOverlay] = []
 
     // In-progress annotation preview
     @Published var rulerPreviewStart: CGPoint? = nil
@@ -312,6 +313,7 @@ class PanelState: ObservableObject, Identifiable {
         isFlippedH = false
         isFlippedV = false
         annotations = []
+        importedOverlays = []
         rulerPreviewStart = nil
         rulerPreviewEnd = nil
         anglePreviewPoints = []
