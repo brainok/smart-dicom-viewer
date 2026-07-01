@@ -179,14 +179,14 @@ struct ContentView: View {
         }
         .inspector(isPresented: $model.showTags) {
             Group {
-                let activeTags = model.activePanel?.tags ?? []
+                let activeTags = model.selectedDerivedObjectID == nil ? (model.activePanel?.tags ?? []) : model.tags
                 if activeTags.isEmpty {
                     ContentUnavailableView("No Tags", systemImage: "tag.slash")
                 } else {
                     TagView(tags: activeTags)
                 }
             }
-            .id(model.activePanelID)
+            .id(model.selectedDerivedObjectID?.absoluteString ?? model.activePanelID.uuidString)
         }
         .sheet(isPresented: $model.showHelp) {
             HelpView()
@@ -284,38 +284,58 @@ struct SeriesListView: View {
 
     var body: some View {
         List(selection: $model.currentSeriesIndex) {
-            ForEach(model.allSeries.indices, id: \.self) { index in
-                SeriesRow(model: model, series: model.allSeries[index], isSelected: index == activeSeriesIndex, seriesIndex: index)
-                .contentShape(Rectangle())
-                .onDrag {
-                    let provider = NSItemProvider()
-                    provider.registerDataRepresentation(
-                        forTypeIdentifier: "public.utf8-plain-text",
-                        visibility: .all
-                    ) { completion in
-                        completion("\(index)".data(using: .utf8), nil)
-                        return nil
-                    }
-                    return provider
-                }
-                .onTapGesture {
-                    // Update legacy indices first (avoids double-load from didSet)
-                    model.currentImageIndex = 0
-                    model.currentSeriesIndex = index
-                    // Load via panel path (legacy state synced via syncLegacyStateToActivePanel)
-                    if let panel = model.activePanel {
-                        model.assignSeriesToPanel(panel, seriesIndex: index)
-                    } else {
-                        // Fallback: no panels yet, use legacy path
-                        if let first = model.allSeries[index].images.first {
-                            model.loadSingleFile(first.url)
+            if !model.allSeries.isEmpty {
+                Section("Image Series") {
+                    ForEach(model.allSeries.indices, id: \.self) { index in
+                        SeriesRow(model: model, series: model.allSeries[index], isSelected: index == activeSeriesIndex, seriesIndex: index)
+                        .contentShape(Rectangle())
+                        .onDrag {
+                            let provider = NSItemProvider()
+                            provider.registerDataRepresentation(
+                                forTypeIdentifier: "public.utf8-plain-text",
+                                visibility: .all
+                            ) { completion in
+                                completion("\(index)".data(using: .utf8), nil)
+                                return nil
+                            }
+                            return provider
                         }
+                        .onTapGesture {
+                            // Update legacy indices first (avoids double-load from didSet)
+                            model.currentImageIndex = 0
+                            model.currentSeriesIndex = index
+                            model.clearSelectedDerivedObject()
+                            // Load via panel path (legacy state synced via syncLegacyStateToActivePanel)
+                            if let panel = model.activePanel {
+                                model.assignSeriesToPanel(panel, seriesIndex: index)
+                            } else {
+                                // Fallback: no panels yet, use legacy path
+                                if let first = model.allSeries[index].images.first {
+                                    model.loadSingleFile(first.url)
+                                }
+                            }
+                        }
+                        .listRowBackground(rowBackground(for: index))
                     }
                 }
-                .listRowBackground(rowBackground(for: index))
+            }
+
+            if !model.derivedObjects.isEmpty {
+                Section("DICOM Objects") {
+                    ForEach(model.derivedObjects) { object in
+                        DerivedObjectRow(object: object, isSelected: model.selectedDerivedObjectID == object.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                model.currentSeriesIndex = -1
+                                model.currentImageIndex = -1
+                                model.inspectDerivedObject(object)
+                            }
+                            .listRowBackground(model.selectedDerivedObjectID == object.id ? Color.orange.opacity(0.16) : nil)
+                    }
+                }
             }
             
-            if model.isScanning && !model.allSeries.isEmpty {
+            if model.isScanning && (!model.allSeries.isEmpty || !model.derivedObjects.isEmpty) {
                  HStack {
                      Spacer()
                      ProgressView()
@@ -331,7 +351,7 @@ struct SeriesListView: View {
         }
         .listStyle(.sidebar)
         .overlay {
-             if model.allSeries.isEmpty {
+             if model.allSeries.isEmpty && model.derivedObjects.isEmpty {
                  if model.isScanning {
                      VStack {
                          ProgressView("Scanning Directory...")
@@ -346,6 +366,35 @@ struct SeriesListView: View {
                  }
              }
         }
+    }
+}
+
+struct DerivedObjectRow: View {
+    let object: DICOMDerivedObjectSummary
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: object.kind.iconName)
+                .font(.system(size: 20))
+                .foregroundStyle(isSelected ? .orange : .secondary)
+                .frame(width: 40, height: 40)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(object.displayTitle)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(object.detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(object.supportSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+        }
+        .help("Inspect \(object.kind.rawValue) DICOM tags")
     }
 }
 

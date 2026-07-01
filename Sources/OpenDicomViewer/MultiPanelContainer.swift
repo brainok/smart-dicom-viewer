@@ -201,6 +201,12 @@ struct PanelView: View {
                     .zIndex(12)
             }
 
+            // Selected DICOM-derived annotation overlay (GSPS, RTSTRUCT)
+            if panel.image != nil && !panel.importedOverlays.isEmpty {
+                ImportedDICOMOverlay(panel: panel)
+                    .zIndex(12.5)
+            }
+
             // Annotation overlay (rulers, angles, ROI stats)
             if panel.image != nil {
                 AnnotationOverlay(panel: panel)
@@ -1348,13 +1354,24 @@ struct ROIOverlay: View {
     /// Convert a pixel-space rectangle to SwiftUI overlay screen coordinates.
     /// Uses the same transform logic as CrossReferenceOverlay's pixelToScreen.
     private func pixelRectToScreen(_ rect: CGRect, viewSize: CGSize) -> CGRect {
-        let topLeft = pixelToScreen(CGPoint(x: rect.minX, y: rect.minY), viewSize: viewSize)
-        let bottomRight = pixelToScreen(CGPoint(x: rect.maxX, y: rect.maxY), viewSize: viewSize)
+        let corners = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+        ].map { pixelToScreen($0, viewSize: viewSize) }
+
+        guard let first = corners.first else { return .zero }
+        let minX = corners.dropFirst().reduce(first.x) { min($0, $1.x) }
+        let minY = corners.dropFirst().reduce(first.y) { min($0, $1.y) }
+        let maxX = corners.dropFirst().reduce(first.x) { max($0, $1.x) }
+        let maxY = corners.dropFirst().reduce(first.y) { max($0, $1.y) }
+
         return CGRect(
-            x: min(topLeft.x, bottomRight.x),
-            y: min(topLeft.y, bottomRight.y),
-            width: abs(bottomRight.x - topLeft.x),
-            height: abs(bottomRight.y - topLeft.y)
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
         )
     }
 
@@ -1780,6 +1797,203 @@ struct OrientationLabelsOverlay: View {
         case "S": return "I"; case "I": return "S"
         default: return ""
         }
+    }
+}
+
+// MARK: - Imported DICOM Overlay
+
+struct ImportedDICOMOverlay: View {
+    @ObservedObject var panel: PanelState
+
+    var body: some View {
+        GeometryReader { geo in
+            ForEach(panel.importedOverlays) { overlay in
+                overlayView(overlay, viewSize: geo.size)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func overlayView(_ overlay: DICOMImportedOverlay, viewSize: CGSize) -> some View {
+        switch overlay.geometry {
+        case .polyline(let points, let closed):
+            let screenPoints = points.map { pixelToScreen(resolve($0, in: overlay.coordinateSpace), viewSize: viewSize) }
+            if screenPoints.count >= 2 {
+                Path { path in
+                    path.move(to: screenPoints[0])
+                    for point in screenPoints.dropFirst() {
+                        path.addLine(to: point)
+                    }
+                    if closed {
+                        path.closeSubpath()
+                    }
+                }
+                .stroke(overlayColor(for: overlay.sourceKind), style: StrokeStyle(lineWidth: 2, lineJoin: .round))
+            }
+
+        case .point(let point):
+            let screenPoint = pixelToScreen(resolve(point, in: overlay.coordinateSpace), viewSize: viewSize)
+            Circle()
+                .stroke(overlayColor(for: overlay.sourceKind), lineWidth: 2)
+                .frame(width: 9, height: 9)
+                .position(screenPoint)
+
+        case .ellipse(let points):
+            let resolved = points.map { resolve($0, in: overlay.coordinateSpace) }
+            if let rect = boundingRect(for: resolved) {
+                let topLeft = pixelToScreen(CGPoint(x: rect.minX, y: rect.minY), viewSize: viewSize)
+                let bottomRight = pixelToScreen(CGPoint(x: rect.maxX, y: rect.maxY), viewSize: viewSize)
+                let screenRect = CGRect(
+                    x: min(topLeft.x, bottomRight.x),
+                    y: min(topLeft.y, bottomRight.y),
+                    width: abs(bottomRight.x - topLeft.x),
+                    height: abs(bottomRight.y - topLeft.y)
+                )
+                Ellipse()
+                    .stroke(overlayColor(for: overlay.sourceKind), lineWidth: 2)
+                    .frame(width: screenRect.width, height: screenRect.height)
+                    .position(x: screenRect.midX, y: screenRect.midY)
+            }
+
+        case .text(let value, let anchor):
+            let screenPoint = pixelToScreen(resolve(anchor, in: overlay.coordinateSpace), viewSize: viewSize)
+            Text(value)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(overlayColor(for: overlay.sourceKind))
+                .padding(3)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(3)
+                .position(screenPoint)
+
+        case .mask(let width, let height, let bitmap):
+            maskOverlay(width: width, height: height, bitmap: bitmap, color: overlayColor(for: overlay.sourceKind), viewSize: viewSize)
+        }
+    }
+
+    private func maskOverlay(width: Int, height: Int, bitmap: Data, color: Color, viewSize: CGSize) -> some View {
+        Canvas { context, _ in
+            var path = Path()
+            guard width > 0, height > 0, bitmap.count == width * height else { return }
+
+            for y in 0..<height {
+                var x = 0
+                while x < width {
+                    let start = x
+                    while x < width && bitmap[y * width + x] != 0 {
+                        x += 1
+                    }
+
+                    if x > start {
+                        let rect = pixelRectToScreen(
+                            CGRect(x: start, y: y, width: x - start, height: 1),
+                            viewSize: viewSize
+                        )
+                        path.addRect(rect)
+                    }
+                    x += 1
+                }
+            }
+
+            context.fill(path, with: .color(color.opacity(0.32)))
+            context.stroke(path, with: .color(color.opacity(0.75)), lineWidth: 0.4)
+        }
+    }
+
+    private func overlayColor(for kind: DICOMDerivedObjectKind) -> Color {
+        switch kind {
+        case .rtStructureSet:
+            return .mint
+        case .dicomSegmentation:
+            return .cyan
+        case .grayscaleSoftcopyPresentationState, .colorSoftcopyPresentationState, .blendingSoftcopyPresentationState:
+            return .yellow
+        default:
+            return .orange
+        }
+    }
+
+    private func resolve(_ point: CGPoint, in coordinateSpace: DICOMOverlayCoordinateSpace) -> CGPoint {
+        switch coordinateSpace {
+        case .pixel:
+            return point
+        case .display:
+            return CGPoint(
+                x: point.x * max(1, panel.displayImageWidth),
+                y: point.y * max(1, panel.displayImageHeight)
+            )
+        }
+    }
+
+    private func pixelRectToScreen(_ rect: CGRect, viewSize: CGSize) -> CGRect {
+        let topLeft = pixelToScreen(CGPoint(x: rect.minX, y: rect.minY), viewSize: viewSize)
+        let bottomRight = pixelToScreen(CGPoint(x: rect.maxX, y: rect.maxY), viewSize: viewSize)
+        return CGRect(
+            x: min(topLeft.x, bottomRight.x),
+            y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x),
+            height: abs(bottomRight.y - topLeft.y)
+        )
+    }
+
+    private func boundingRect(for points: [CGPoint]) -> CGRect? {
+        guard let first = points.first else { return nil }
+        var minX = first.x
+        var minY = first.y
+        var maxX = first.x
+        var maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            minY = min(minY, point.y)
+            maxX = max(maxX, point.x)
+            maxY = max(maxY, point.y)
+        }
+        if minX == maxX { maxX += 1 }
+        if minY == maxY { maxY += 1 }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func pixelToScreen(_ pixel: CGPoint, viewSize: CGSize) -> CGPoint {
+        let imgW = max(1, panel.displayImageWidth)
+        let imgH = max(1, panel.displayImageHeight)
+        let vw = viewSize.width
+        let vh = viewSize.height
+
+        let fitScale = min(vw / imgW, vh / imgH)
+        let offsetX = (vw - imgW * fitScale) / 2
+        let offsetY = (vh - imgH * fitScale) / 2
+
+        var x = pixel.x * fitScale + offsetX
+        var y = pixel.y * fitScale + offsetY
+
+        let cx = vw / 2
+        let cy = vh / 2
+        x -= cx
+        y -= cy
+
+        if panel.isFlippedH { x = -x }
+        if panel.isFlippedV { y = -y }
+
+        let steps = panel.rotationSteps % 4
+        if steps > 0 {
+            let angle = -CGFloat(steps) * .pi / 2
+            let cosA = cos(angle)
+            let sinA = sin(angle)
+            let rx = x * cosA - y * sinA
+            let ry = x * sinA + y * cosA
+            x = rx
+            y = ry
+        }
+
+        x *= panel.scale
+        y *= panel.scale
+
+        x += panel.translation.x
+        y -= panel.translation.y
+
+        x += cx
+        y += cy
+        return CGPoint(x: x, y: y)
     }
 }
 

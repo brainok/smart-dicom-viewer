@@ -7,6 +7,8 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 import XCTest
+import CoreGraphics
+import simd
 @testable import OpenDicomViewer
 
 final class SimpleDICOMTests: XCTestCase {
@@ -171,6 +173,58 @@ final class SimpleDICOMTests: XCTestCase {
         ]
     }
 
+    private func dicomText(_ value: String, padByte: UInt8 = 0x20) -> Data {
+        var data = Data(value.utf8)
+        if data.count % 2 != 0 {
+            data.append(padByte)
+        }
+        return data
+    }
+
+    private func dicomElement(_ group: UInt16, _ element: UInt16, _ vr: String, _ value: Data) -> Data {
+        var data = Data()
+        data.append(contentsOf: uint16LE(group))
+        data.append(contentsOf: uint16LE(element))
+        data.append(vr.data(using: .ascii)!)
+        let longVRs = ["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]
+        if longVRs.contains(vr) {
+            data.append(contentsOf: uint16LE(0))
+            data.append(contentsOf: uint32LE(UInt32(value.count)))
+        } else {
+            data.append(contentsOf: uint16LE(UInt16(value.count)))
+        }
+        data.append(value)
+        return data
+    }
+
+    private func sequenceItem(_ dataSet: Data) -> Data {
+        var data = Data()
+        data.append(contentsOf: uint16LE(0xFFFE))
+        data.append(contentsOf: uint16LE(0xE000))
+        data.append(contentsOf: uint32LE(UInt32(dataSet.count)))
+        data.append(dataSet)
+        return data
+    }
+
+    private func float32Data(_ values: [Float32]) -> Data {
+        var data = Data()
+        for value in values {
+            var bits = value.bitPattern.littleEndian
+            data.append(Data(bytes: &bits, count: 4))
+        }
+        return data
+    }
+
+    private func uint16Data(_ value: UInt16) -> Data {
+        var littleEndian = value.littleEndian
+        return Data(bytes: &littleEndian, count: 2)
+    }
+
+    private func fixtureURL(_ relativePath: String) -> URL {
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(relativePath)
+    }
+
     func testParserRejectsTooSmallData() {
         let data = Data(count: 100)  // Less than 132 bytes
         let parser = SimpleDicomParser(data: data)
@@ -331,6 +385,346 @@ final class SimpleDICOMTests: XCTestCase {
             XCTAssertEqual(val, 1.5, accuracy: 0.001)
         } else {
             XCTFail("Could not parse DS value")
+        }
+    }
+
+    // MARK: - DICOM-derived object classification
+
+    func testDerivedObjectClassificationBySOPClassUID() {
+        XCTAssertEqual(
+            DICOMDerivedObjectParser.classify(
+                sopClassUID: "1.2.840.10008.5.1.4.1.1.11.1",
+                modality: ""
+            ),
+            .grayscaleSoftcopyPresentationState
+        )
+        XCTAssertEqual(
+            DICOMDerivedObjectParser.classify(
+                sopClassUID: "1.2.840.10008.5.1.4.1.1.481.3",
+                modality: ""
+            ),
+            .rtStructureSet
+        )
+        XCTAssertEqual(
+            DICOMDerivedObjectParser.classify(
+                sopClassUID: "1.2.840.10008.5.1.4.1.1.66.4",
+                modality: ""
+            ),
+            .dicomSegmentation
+        )
+        XCTAssertEqual(
+            DICOMDerivedObjectParser.classify(
+                sopClassUID: "1.2.840.10008.5.1.4.1.1.88.33",
+                modality: ""
+            ),
+            .structuredReport
+        )
+        XCTAssertNil(
+            DICOMDerivedObjectParser.classify(
+                sopClassUID: "1.2.840.10008.5.1.4.1.1.2",
+                modality: "CT"
+            )
+        )
+    }
+
+    func testDerivedObjectClassificationByModalityFallback() {
+        XCTAssertEqual(DICOMDerivedObjectParser.classify(sopClassUID: "", modality: "RTSTRUCT"), .rtStructureSet)
+        XCTAssertEqual(DICOMDerivedObjectParser.classify(sopClassUID: "", modality: "SEG"), .dicomSegmentation)
+        XCTAssertEqual(DICOMDerivedObjectParser.classify(sopClassUID: "", modality: "SR"), .structuredReport)
+        XCTAssertEqual(DICOMDerivedObjectParser.classify(sopClassUID: "", modality: "KO"), .keyObjectSelection)
+        XCTAssertEqual(DICOMDerivedObjectParser.classify(sopClassUID: "", modality: "PR"), .grayscaleSoftcopyPresentationState)
+    }
+
+    func testDerivedObjectParserReadsMinimalRTStructureSet() throws {
+        let sopClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
+        let dicomData = buildMinimalDICOM(elements: [
+            (group: 0x0008, element: 0x0016, vr: "UI", value: dicomText(sopClassUID, padByte: 0x00)),
+            (group: 0x0008, element: 0x0060, vr: "CS", value: dicomText("RTSTRUCT")),
+            (group: 0x0008, element: 0x103E, vr: "LO", value: dicomText("Contours")),
+            (group: 0x0020, element: 0x000D, vr: "UI", value: dicomText("1.2.3.4.5", padByte: 0x00)),
+            (group: 0x0020, element: 0x000E, vr: "UI", value: dicomText("1.2.3.4.5.6", padByte: 0x00)),
+            (group: 0x0020, element: 0x0013, vr: "IS", value: dicomText("7")),
+            (group: 0x3006, element: 0x0002, vr: "SH", value: dicomText("LIVER")),
+        ])
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenDicomViewer-\(UUID().uuidString)")
+            .appendingPathExtension("dcm")
+        try dicomData.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let summary = try XCTUnwrap(DICOMDerivedObjectParser.parse(url: url))
+        XCTAssertEqual(summary.kind, .rtStructureSet)
+        XCTAssertEqual(summary.sopClassUID, sopClassUID)
+        XCTAssertEqual(summary.modality, "RTSTRUCT")
+        XCTAssertEqual(summary.displayTitle, "LIVER")
+        XCTAssertEqual(summary.seriesDescription, "Contours")
+        XCTAssertEqual(summary.studyInstanceUID, "1.2.3.4.5")
+        XCTAssertEqual(summary.seriesUID, "1.2.3.4.5.6")
+        XCTAssertEqual(summary.instanceNumber, 7)
+        XCTAssertTrue(summary.tags.contains { $0.tag == DicomTag(group: 0x3006, element: 0x0002) })
+    }
+
+    func testGSPSParserReadsGraphicAnnotation() throws {
+        let referencedSOP = "1.2.826.0.1.3680043.10.99.100"
+        var referencedImageItem = Data()
+        referencedImageItem.append(dicomElement(0x0008, 0x1155, "UI", dicomText(referencedSOP, padByte: 0x00)))
+
+        var graphicObjectItem = Data()
+        graphicObjectItem.append(dicomElement(0x0070, 0x0020, "US", Data([0x02, 0x00])))
+        graphicObjectItem.append(dicomElement(0x0070, 0x0021, "US", Data([0x02, 0x00])))
+        graphicObjectItem.append(dicomElement(0x0070, 0x0022, "FL", float32Data([0, 0, 32, 32])))
+        graphicObjectItem.append(dicomElement(0x0070, 0x0023, "CS", dicomText("POLYLINE")))
+
+        var annotationItem = Data()
+        annotationItem.append(dicomElement(0x0008, 0x1140, "SQ", sequenceItem(referencedImageItem)))
+        annotationItem.append(dicomElement(0x0070, 0x0002, "CS", dicomText("MEASURE")))
+        annotationItem.append(dicomElement(0x0070, 0x0005, "CS", dicomText("PIXEL")))
+        annotationItem.append(dicomElement(0x0070, 0x0009, "SQ", sequenceItem(graphicObjectItem)))
+
+        let dicomData = buildMinimalDICOM(elements: [
+            (group: 0x0008, element: 0x0016, vr: "UI", value: dicomText("1.2.840.10008.5.1.4.1.1.11.1", padByte: 0x00)),
+            (group: 0x0008, element: 0x0018, vr: "UI", value: dicomText("1.2.826.0.1.3680043.10.99.200", padByte: 0x00)),
+            (group: 0x0008, element: 0x0060, vr: "CS", value: dicomText("PR")),
+            (group: 0x0070, element: 0x0080, vr: "CS", value: dicomText("TEST_GSPS")),
+            (group: 0x0070, element: 0x0001, vr: "SQ", value: sequenceItem(annotationItem)),
+        ])
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenDicomViewer-gsps-\(UUID().uuidString)")
+            .appendingPathExtension("dcm")
+        try dicomData.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .grayscaleSoftcopyPresentationState))
+        XCTAssertEqual(object.graphics.count, 1)
+        let context = DicomImageContext(
+            url: URL(fileURLWithPath: "/tmp/source.dcm"),
+            sopInstanceUID: referencedSOP,
+            seriesUID: "series",
+            seriesDescription: "series",
+            instanceNumber: 1,
+            seriesNumber: 1,
+            zLocation: nil,
+            imagePosition: nil,
+            imageOrientation: nil,
+            pixelSpacing: nil,
+            sliceThickness: nil,
+            spacingBetweenSlices: nil,
+            frameOfReferenceUID: nil,
+            studyInstanceUID: nil,
+            numberOfFrames: 1
+        )
+        let overlays = object.resolvedOverlays(for: context)
+        XCTAssertEqual(overlays.count, 1)
+        if case .polyline(let points, let closed) = overlays[0].geometry {
+            XCTAssertFalse(closed)
+            XCTAssertEqual(points, [CGPoint(x: 0, y: 0), CGPoint(x: 32, y: 32)])
+        } else {
+            XCTFail("Expected polyline overlay")
+        }
+    }
+
+    func testRTStructureSetParserProjectsReferencedContourToPixelSpace() throws {
+        let referencedSOP = "1.2.826.0.1.3680043.10.99.300"
+
+        var roiItem = Data()
+        roiItem.append(dicomElement(0x3006, 0x0022, "IS", dicomText("1")))
+        roiItem.append(dicomElement(0x3006, 0x0026, "LO", dicomText("ROI_A")))
+
+        var contourImageItem = Data()
+        contourImageItem.append(dicomElement(0x0008, 0x1155, "UI", dicomText(referencedSOP, padByte: 0x00)))
+
+        var contourItem = Data()
+        contourItem.append(dicomElement(0x3006, 0x0016, "SQ", sequenceItem(contourImageItem)))
+        contourItem.append(dicomElement(0x3006, 0x0042, "CS", dicomText("CLOSED_PLANAR")))
+        contourItem.append(dicomElement(0x3006, 0x0046, "IS", dicomText("4")))
+        contourItem.append(dicomElement(0x3006, 0x0050, "DS", dicomText("0\\0\\0\\10\\0\\0\\10\\10\\0\\0\\10\\0")))
+
+        var roiContourItem = Data()
+        roiContourItem.append(dicomElement(0x3006, 0x0084, "IS", dicomText("1")))
+        roiContourItem.append(dicomElement(0x3006, 0x0040, "SQ", sequenceItem(contourItem)))
+
+        let dicomData = buildMinimalDICOM(elements: [
+            (group: 0x0008, element: 0x0016, vr: "UI", value: dicomText("1.2.840.10008.5.1.4.1.1.481.3", padByte: 0x00)),
+            (group: 0x0008, element: 0x0060, vr: "CS", value: dicomText("RTSTRUCT")),
+            (group: 0x3006, element: 0x0002, vr: "SH", value: dicomText("STRUCT")),
+            (group: 0x0020, element: 0x0052, vr: "UI", value: dicomText("1.2.3.frame", padByte: 0x00)),
+            (group: 0x3006, element: 0x0020, vr: "SQ", value: sequenceItem(roiItem)),
+            (group: 0x3006, element: 0x0039, vr: "SQ", value: sequenceItem(roiContourItem)),
+        ])
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenDicomViewer-rtstruct-\(UUID().uuidString)")
+            .appendingPathExtension("dcm")
+        try dicomData.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .rtStructureSet))
+        XCTAssertEqual(object.contours.count, 1)
+
+        let context = DicomImageContext(
+            url: URL(fileURLWithPath: "/tmp/source.dcm"),
+            sopInstanceUID: referencedSOP,
+            seriesUID: "series",
+            seriesDescription: "series",
+            instanceNumber: 1,
+            seriesNumber: 1,
+            zLocation: 0,
+            imagePosition: SIMD3<Double>(0, 0, 0),
+            imageOrientation: [1, 0, 0, 0, 1, 0],
+            pixelSpacing: SIMD2<Double>(1, 1),
+            sliceThickness: 1,
+            spacingBetweenSlices: 1,
+            frameOfReferenceUID: "1.2.3.frame",
+            studyInstanceUID: nil,
+            numberOfFrames: 1
+        )
+
+        let overlays = object.resolvedOverlays(for: context)
+        XCTAssertEqual(overlays.count, 1)
+        XCTAssertEqual(overlays[0].label, "ROI_A")
+        if case .polyline(let points, let closed) = overlays[0].geometry {
+            XCTAssertTrue(closed)
+            XCTAssertEqual(points, [
+                CGPoint(x: 0, y: 0),
+                CGPoint(x: 10, y: 0),
+                CGPoint(x: 10, y: 10),
+                CGPoint(x: 0, y: 10),
+            ])
+        } else {
+            XCTFail("Expected RTSTRUCT polyline overlay")
+        }
+    }
+
+    func testDICOMSegmentationParserReadsBinaryMaskFrame() throws {
+        let referencedSOP = "1.2.826.0.1.3680043.10.99.400"
+
+        var segmentItem = Data()
+        segmentItem.append(dicomElement(0x0062, 0x0004, "US", uint16Data(1)))
+        segmentItem.append(dicomElement(0x0062, 0x0005, "LO", dicomText("TUMOR")))
+
+        var sourceImageItem = Data()
+        sourceImageItem.append(dicomElement(0x0008, 0x1155, "UI", dicomText(referencedSOP, padByte: 0x00)))
+
+        var derivationItem = Data()
+        derivationItem.append(dicomElement(0x0008, 0x2112, "SQ", sequenceItem(sourceImageItem)))
+
+        var segmentIdentificationItem = Data()
+        segmentIdentificationItem.append(dicomElement(0x0062, 0x000B, "US", uint16Data(1)))
+
+        var frameItem = Data()
+        frameItem.append(dicomElement(0x0008, 0x9124, "SQ", sequenceItem(derivationItem)))
+        frameItem.append(dicomElement(0x0062, 0x000A, "SQ", sequenceItem(segmentIdentificationItem)))
+
+        let dicomData = buildMinimalDICOM(elements: [
+            (group: 0x0008, element: 0x0016, vr: "UI", value: dicomText("1.2.840.10008.5.1.4.1.1.66.4", padByte: 0x00)),
+            (group: 0x0008, element: 0x0060, vr: "CS", value: dicomText("SEG")),
+            (group: 0x0008, element: 0x103E, vr: "LO", value: dicomText("Binary SEG")),
+            (group: 0x0028, element: 0x0002, vr: "US", value: uint16Data(1)),
+            (group: 0x0028, element: 0x0008, vr: "IS", value: dicomText("1")),
+            (group: 0x0028, element: 0x0010, vr: "US", value: uint16Data(2)),
+            (group: 0x0028, element: 0x0011, vr: "US", value: uint16Data(2)),
+            (group: 0x0028, element: 0x0100, vr: "US", value: uint16Data(1)),
+            (group: 0x0028, element: 0x0101, vr: "US", value: uint16Data(1)),
+            (group: 0x0062, element: 0x0001, vr: "CS", value: dicomText("BINARY")),
+            (group: 0x0062, element: 0x0002, vr: "SQ", value: sequenceItem(segmentItem)),
+            (group: 0x5200, element: 0x9230, vr: "SQ", value: sequenceItem(frameItem)),
+            (group: 0x7FE0, element: 0x0010, vr: "OB", value: Data([0b0000_1001])),
+        ])
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenDicomViewer-seg-\(UUID().uuidString)")
+            .appendingPathExtension("dcm")
+        try dicomData.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .dicomSegmentation))
+        XCTAssertEqual(object.segmentFrames.count, 1)
+
+        let context = DicomImageContext(
+            url: URL(fileURLWithPath: "/tmp/source.dcm"),
+            sopInstanceUID: referencedSOP,
+            seriesUID: "series",
+            seriesDescription: "series",
+            instanceNumber: 1,
+            seriesNumber: 1,
+            zLocation: nil,
+            imagePosition: nil,
+            imageOrientation: nil,
+            pixelSpacing: nil,
+            sliceThickness: nil,
+            spacingBetweenSlices: nil,
+            frameOfReferenceUID: nil,
+            studyInstanceUID: nil,
+            numberOfFrames: 1
+        )
+
+        let overlays = object.resolvedOverlays(for: context)
+        XCTAssertEqual(overlays.count, 1)
+        XCTAssertEqual(overlays[0].label, "TUMOR")
+        if case .mask(let width, let height, let bitmap) = overlays[0].geometry {
+            XCTAssertEqual(width, 2)
+            XCTAssertEqual(height, 2)
+            XCTAssertEqual(Array(bitmap), [1, 0, 0, 1])
+        } else {
+            XCTFail("Expected SEG mask overlay")
+        }
+    }
+
+    func testPublicOFFISGSPSFixtureParsesGraphicOverlay() throws {
+        let url = fixtureURL("Tests/Fixtures/PublicDICOMAnnotations/OFFIS_GSPS/gsps_256x256_16x16_1.0x1.0.dcm")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("OFFIS GSPS fixture not present")
+        }
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .grayscaleSoftcopyPresentationState))
+        XCTAssertFalse(object.graphics.isEmpty)
+    }
+
+    func testPublicPydicomRTStructFixtureParsesContoursWithoutPreamble() throws {
+        let url = fixtureURL("Tests/Fixtures/PublicDICOMAnnotations/pydicom_RTSTRUCT/rtstruct.dcm")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("pydicom RTSTRUCT fixture not present")
+        }
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .rtStructureSet))
+        XCTAssertFalse(object.contours.isEmpty)
+    }
+
+    func testPublicHighdicomSEGFixtureParsesBinaryMasks() throws {
+        let url = fixtureURL("Tests/Fixtures/PublicDICOMAnnotations/highdicom_SEG/seg_image_ct_binary.dcm")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("highdicom SEG fixture not present")
+        }
+
+        let object = try XCTUnwrap(DICOMAnnotationObjectParser.parse(url: url, kind: .dicomSegmentation))
+        XCTAssertEqual(object.segmentFrames.count, 3)
+
+        let context = DicomImageContext(
+            url: URL(fileURLWithPath: "/tmp/source.dcm"),
+            sopInstanceUID: "1.3.6.1.4.1.5962.1.1.0.0.0.1196530851.28319.0.94",
+            seriesUID: "series",
+            seriesDescription: "series",
+            instanceNumber: 1,
+            seriesNumber: 1,
+            zLocation: nil,
+            imagePosition: nil,
+            imageOrientation: nil,
+            pixelSpacing: nil,
+            sliceThickness: nil,
+            spacingBetweenSlices: nil,
+            frameOfReferenceUID: nil,
+            studyInstanceUID: nil,
+            numberOfFrames: 1
+        )
+
+        let overlays = object.resolvedOverlays(for: context)
+        XCTAssertEqual(overlays.count, 1)
+        if case .mask(let width, let height, let bitmap) = overlays[0].geometry {
+            XCTAssertEqual(width, 16)
+            XCTAssertEqual(height, 16)
+            XCTAssertEqual(bitmap.reduce(0) { $0 + Int($1) }, 127)
+        } else {
+            XCTFail("Expected SEG mask overlay")
         }
     }
 

@@ -33,6 +33,7 @@ import UniformTypeIdentifiers
 struct DicomImageContext: Identifiable, Equatable {
     var id: URL { url }
     let url: URL
+    let sopInstanceUID: String
     let seriesUID: String
     let seriesDescription: String
     let instanceNumber: Int
@@ -116,6 +117,9 @@ class DICOMModel: ObservableObject {
     
     // Series Management
     @Published var allSeries: [DicomSeries] = []
+    @Published var derivedObjects: [DICOMDerivedObjectSummary] = []
+    @Published var annotationObjects: [DICOMAnnotationObject] = []
+    @Published var selectedDerivedObjectID: URL? = nil
     @Published var currentSeriesIndex: Int = -1 {
         didSet {
              if currentSeriesIndex != -1 {
@@ -708,6 +712,10 @@ class DICOMModel: ObservableObject {
             self.image = nil
             self.rawPixelData = nil
             self.allSeries = []
+            self.derivedObjects = []
+            self.annotationObjects = []
+            self.selectedDerivedObjectID = nil
+            self.panels.forEach { $0.importedOverlays = [] }
             self.currentSeriesIndex = -1
             self.currentImageIndex = -1
             self.tags = []
@@ -1833,6 +1841,8 @@ class DICOMModel: ObservableObject {
             let fileManager = FileManager.default
             guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
             var contexts: [DicomImageContext] = []
+            var derivedObjects: [DICOMDerivedObjectSummary] = []
+            var annotationObjects: [DICOMAnnotationObject] = []
             
             // Helper to update UI safely
             func updateUI(isFinal: Bool) {
@@ -1874,7 +1884,22 @@ class DICOMModel: ObservableObject {
                     let currentImgURL = (self.currentSeriesIndex >= 0 && self.currentSeriesIndex < self.allSeries.count && self.currentImageIndex >= 0 && self.currentImageIndex < self.allSeries[self.currentSeriesIndex].images.count) ? self.allSeries[self.currentSeriesIndex].images[self.currentImageIndex].url : nil
                     
                     self.allSeries = seriesList
-                    
+                    self.derivedObjects = derivedObjects.sorted {
+                        if $0.kind.rawValue != $1.kind.rawValue { return $0.kind.rawValue < $1.kind.rawValue }
+                        return $0.displayTitle < $1.displayTitle
+                    }
+                    self.annotationObjects = annotationObjects
+                    self.refreshImportedOverlaysForAllPanels()
+                    if isFinal,
+                       CommandLine.arguments.contains("--select-first-derived"),
+                       self.selectedDerivedObjectID == nil,
+                       let firstDerivedObject = self.derivedObjects.first {
+                        self.selectedDerivedObjectID = firstDerivedObject.id
+                        self.tags = firstDerivedObject.tags
+                        self.showTags = true
+                        self.refreshImportedOverlaysForAllPanels()
+                    }
+
                     if isFinal { self.isScanning = false }
                     
                     // Restore Selection or Initialize
@@ -1936,7 +1961,7 @@ class DICOMModel: ObservableObject {
                                  }
                              }
                          }
-                    } else if self.allSeries.isEmpty && isFinal {
+                    } else if self.allSeries.isEmpty && self.derivedObjects.isEmpty && isFinal {
                         self.errorMessage = "No DICOM series found."
                         self.isLoading = false
                     }
@@ -1996,6 +2021,15 @@ class DICOMModel: ObservableObject {
                     if counter % 100 == 0 {
                         updateUI(isFinal: false)
                     }
+                } else if let derivedObject = DICOMDerivedObjectParser.parse(url: fileURL) {
+                    derivedObjects.append(derivedObject)
+                    if let annotationObject = DICOMAnnotationObjectParser.parse(url: fileURL, kind: derivedObject.kind) {
+                        annotationObjects.append(annotationObject)
+                    }
+                    counter += 1
+                    if counter % 100 == 0 {
+                        updateUI(isFinal: false)
+                    }
                 }
             }
             
@@ -2012,6 +2046,55 @@ class DICOMModel: ObservableObject {
                     self.autoAssignSeriesToPanels()
                 }
             }
+        }
+    }
+
+    func inspectDerivedObject(_ object: DICOMDerivedObjectSummary) {
+        selectedDerivedObjectID = object.id
+        tags = object.tags
+        showTags = true
+        errorMessage = nil
+        refreshImportedOverlaysForAllPanels()
+    }
+
+    func clearSelectedDerivedObject() {
+        selectedDerivedObjectID = nil
+        refreshImportedOverlaysForAllPanels()
+    }
+
+    private func currentImageContext(for panel: PanelState) -> DicomImageContext? {
+        guard panel.seriesIndex >= 0,
+              panel.seriesIndex < allSeries.count,
+              panel.imageIndex >= 0,
+              panel.imageIndex < allSeries[panel.seriesIndex].images.count else {
+            return nil
+        }
+        return allSeries[panel.seriesIndex].images[panel.imageIndex]
+    }
+
+    private func importedOverlays(for context: DicomImageContext) -> [DICOMImportedOverlay] {
+        guard let selectedDerivedObjectID,
+              let object = annotationObjects.first(where: { $0.url == selectedDerivedObjectID }) else {
+            return []
+        }
+        return object.resolvedOverlays(for: context)
+    }
+
+    func refreshImportedOverlays(for panel: PanelState) {
+        guard let context = currentImageContext(for: panel) else {
+            panel.importedOverlays = []
+            return
+        }
+        setImportedOverlays(for: panel, imageContext: context)
+    }
+
+    private func setImportedOverlays(for panel: PanelState, imageContext: DicomImageContext) {
+        panel.importedOverlays = importedOverlays(for: imageContext)
+    }
+
+    func refreshImportedOverlaysForAllPanels() {
+        for panel in panels {
+            refreshImportedOverlays(for: panel)
         }
     }
     
@@ -2035,6 +2118,7 @@ class DICOMModel: ObservableObject {
             // Filter out non-image DICOM objects (Structured Reports, Key Objects,
             // Presentation States, etc.) by checking SOP Class UID and Modality.
             let sopClassUID = getStr(g: 0x0008, e: 0x0016) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0016)) ?? ""
+            let sopInstanceUID = getStr(g: 0x0008, e: 0x0018) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0018)) ?? ""
             let modality = getStr(g: 0x0008, e: 0x0060) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0060)) ?? ""
 
             // Non-image SOP Class UID prefixes/values to exclude
@@ -2059,12 +2143,16 @@ class DICOMModel: ObservableObject {
                 "1.2.840.10008.5.1.4.1.1.11.2",   // Color Softcopy Presentation State
                 "1.2.840.10008.5.1.4.1.1.11.3",   // Pseudo-Color Softcopy Presentation State
                 "1.2.840.10008.5.1.4.1.1.11.4",   // Blending Softcopy Presentation State
+                "1.2.840.10008.5.1.4.1.1.481.3",  // RT Structure Set
+                "1.2.840.10008.5.1.4.1.1.66.4",   // Segmentation
+                "1.2.840.10008.5.1.4.1.1.66.5",   // Surface Segmentation
+                "1.2.840.10008.5.1.4.1.1.66.6",   // Tractography
                 "1.2.840.10008.3.1.2.3.3",         // Modality Performed Procedure Step
                 "1.2.840.10008.5.1.4.1.1.104.1",  // Encapsulated PDF
                 "1.2.840.10008.5.1.4.1.1.104.2",  // Encapsulated CDA
                 "1.2.840.10008.1.3.10",            // Media Storage Directory (DICOMDIR)
             ]
-            let nonImageModalities: Set<String> = ["SR", "KO", "PR"]
+            let nonImageModalities: Set<String> = ["SR", "KO", "PR", "RTSTRUCT", "SEG"]
 
             let trimmedSOP = sopClassUID.trimmingCharacters(in: .whitespacesAndNewlines)
             let trimmedModality = modality.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -2171,6 +2259,7 @@ class DICOMModel: ObservableObject {
 
             return DicomImageContext(
                 url: url,
+                sopInstanceUID: sopInstanceUID,
                 seriesUID: seriesUID,
                 seriesDescription: seriesDescription,
                 instanceNumber: finalInstanceNumber,
@@ -2308,6 +2397,7 @@ class DICOMModel: ObservableObject {
 
         let series = allSeries[seriesIndex]
         if let first = series.images.first {
+            setImportedOverlays(for: panel, imageContext: first)
             // Check if this is a multi-frame DICOM
             if first.numberOfFrames > 1 {
                 setupMultiFrameForPanel(panel, imageContext: first)
@@ -4119,6 +4209,7 @@ class DICOMModel: ObservableObject {
     /// Call this instead of loadSingleFileForPanel when navigating between images.
     func loadFileForPanel(_ panel: PanelState, imageContext: DicomImageContext) {
         stopCinePlayback(panel)
+        setImportedOverlays(for: panel, imageContext: imageContext)
         if imageContext.numberOfFrames > 1 {
             setupMultiFrameForPanel(panel, imageContext: imageContext)
         } else {
