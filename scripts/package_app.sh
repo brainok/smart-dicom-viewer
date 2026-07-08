@@ -8,7 +8,7 @@ set -e
 EXECUTABLE_NAME="OpenDicomViewer"
 APP_NAME="Smart DICOM Viewer"
 RELEASE_DIR="release/v2.0"
-SIGNING_IDENTITY="Developer ID Application: Joon Heo (KCRAUWJ5MM)"
+SIGNING_IDENTITY="Developer ID Application: HYO SUK NAM (FC724Q48DM)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
 
