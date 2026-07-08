@@ -90,37 +90,6 @@ struct VolumeToolbar: View {
                     .foregroundStyle(.secondary)
             }
 
-            Divider().frame(height: 16)
-
-            // Rotate / Flip controls
-            Button(action: {
-                panel.rotationSteps = (panel.rotationSteps + 1) % 4
-            }) {
-                Image(systemName: "rotate.right")
-                    .font(.system(.caption))
-            }
-            .buttonStyle(.plain)
-            .help("Rotate 90° clockwise")
-
-            Button(action: {
-                panel.isFlippedH.toggle()
-            }) {
-                Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right")
-                    .font(.system(.caption))
-                    .foregroundStyle(panel.isFlippedH ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Flip horizontal")
-
-            Button(action: {
-                panel.isFlippedV.toggle()
-            }) {
-                Image(systemName: "arrow.up.and.down.righttriangle.up.righttriangle.down")
-                    .font(.system(.caption))
-                    .foregroundStyle(panel.isFlippedV ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Flip vertical")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)

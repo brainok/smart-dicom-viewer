@@ -5,7 +5,7 @@
 // Provides buttons for:
 //   - Panel layout switching (1x1, 2x1, 1x2, 2x2) with number key badges
 //   - Synchronized scrolling toggle (link icon, "L" key)
-//   - Cross-reference line toggle (cross icon, "X" key)
+    //   - 1x2 comparison panel toggle
 // Each button shows its keyboard shortcut as a small badge.
 // Licensed under the MIT License. See LICENSE for details.
 
@@ -73,25 +73,27 @@ struct LayoutToolbar: View {
                 ? "Disable Synchronized Scrolling (L)"
                 : "Enable Synchronized Scrolling (L)")
 
-            Button(action: { model.showCrossReference.toggle() }) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    model.setupOneByTwoComparison()
+                }
+            }) {
                 ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: "cross")
+                    Image(systemName: "rectangle.split.2x1")
                         .font(.system(size: 14))
                         .foregroundStyle(
-                            model.showCrossReference ? .cyan : .secondary
+                            model.isSplitComparisonMode ? .cyan : .secondary
                         )
                         .frame(width: 28, height: 28)
 
-                    Text("X")
+                    Text("2")
                         .font(.system(size: 8, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                         .offset(x: -2, y: -1)
                 }
             }
             .buttonStyle(.plain)
-            .help(model.showCrossReference
-                ? "Hide Cross-Reference Lines (X)"
-                : "Show Cross-Reference Lines (X)")
+            .help("Open 1×2 Compare Panels")
         }
         .padding(6)
         .background(.ultraThinMaterial)

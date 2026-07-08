@@ -48,7 +48,68 @@ struct DicomImageContext: Identifiable, Equatable {
     let spacingBetweenSlices: Double?          // (0018,0088)
     let frameOfReferenceUID: String?          // (0020,0052) - gates cross-referencing
     let studyInstanceUID: String?             // (0020,000D)
+    let studyDescription: String?             // (0008,1030)
+    let studyDate: String?                    // (0008,0020)
+    let studyTime: String?                    // (0008,0030)
+    let accessionNumber: String?              // (0008,0050)
+    let patientName: String?                  // (0010,0010)
+    let patientID: String?                    // (0010,0020)
+    let patientSex: String?                   // (0010,0040)
+    let patientAge: String?                   // (0010,1010)
+    let modality: String?                     // (0008,0060)
     let numberOfFrames: Int                   // (0028,0008) - 1 for single frame
+
+    init(
+        url: URL,
+        sopInstanceUID: String,
+        seriesUID: String,
+        seriesDescription: String,
+        instanceNumber: Int,
+        seriesNumber: Int,
+        zLocation: Double?,
+        imagePosition: SIMD3<Double>?,
+        imageOrientation: [Double]?,
+        pixelSpacing: SIMD2<Double>?,
+        sliceThickness: Double?,
+        spacingBetweenSlices: Double?,
+        frameOfReferenceUID: String?,
+        studyInstanceUID: String?,
+        studyDescription: String? = nil,
+        studyDate: String? = nil,
+        studyTime: String? = nil,
+        accessionNumber: String? = nil,
+        patientName: String? = nil,
+        patientID: String? = nil,
+        patientSex: String? = nil,
+        patientAge: String? = nil,
+        modality: String? = nil,
+        numberOfFrames: Int
+    ) {
+        self.url = url
+        self.sopInstanceUID = sopInstanceUID
+        self.seriesUID = seriesUID
+        self.seriesDescription = seriesDescription
+        self.instanceNumber = instanceNumber
+        self.seriesNumber = seriesNumber
+        self.zLocation = zLocation
+        self.imagePosition = imagePosition
+        self.imageOrientation = imageOrientation
+        self.pixelSpacing = pixelSpacing
+        self.sliceThickness = sliceThickness
+        self.spacingBetweenSlices = spacingBetweenSlices
+        self.frameOfReferenceUID = frameOfReferenceUID
+        self.studyInstanceUID = studyInstanceUID
+        self.studyDescription = studyDescription
+        self.studyDate = studyDate
+        self.studyTime = studyTime
+        self.accessionNumber = accessionNumber
+        self.patientName = patientName
+        self.patientID = patientID
+        self.patientSex = patientSex
+        self.patientAge = patientAge
+        self.modality = modality
+        self.numberOfFrames = numberOfFrames
+    }
 
     static func == (lhs: DicomImageContext, rhs: DicomImageContext) -> Bool {
         return lhs.url == rhs.url
@@ -72,6 +133,51 @@ struct DicomSeries: Identifiable, Equatable {
     let seriesNumber: Int
     let seriesDescription: String
     var images: [DicomImageContext]
+
+    var studyInstanceUID: String? {
+        images.first?.studyInstanceUID
+    }
+
+    var studyDescription: String? {
+        images.first?.studyDescription
+    }
+
+    var studyDate: String? {
+        images.first?.studyDate
+    }
+
+    var studyTime: String? {
+        images.first?.studyTime
+    }
+
+    var accessionNumber: String? {
+        images.first?.accessionNumber
+    }
+
+    var patientName: String? {
+        images.first?.patientName
+    }
+
+    var patientID: String? {
+        images.first?.patientID
+    }
+
+    var patientSex: String? {
+        images.first?.patientSex
+    }
+
+    var patientAge: String? {
+        images.first?.patientAge
+    }
+
+    var modality: String? {
+        images.first?.modality
+    }
+
+    var thumbnailImageContext: DicomImageContext? {
+        guard !images.isEmpty else { return nil }
+        return images[images.count / 2]
+    }
 
     /// Computed: dominant axis of this series (axial/sagittal/coronal) based on ImageOrientationPatient
     var dominantAxis: SliceAxis? {
@@ -166,6 +272,8 @@ class DICOMModel: ObservableObject {
     struct SeriesViewState {
         var windowWidth: Double?
         var windowCenter: Double?
+        var initialWindowWidth: Double?
+        var initialWindowCenter: Double?
         var scale: CGFloat = 1.0
         var translation: CGPoint = .zero
     }
@@ -184,37 +292,15 @@ class DICOMModel: ObservableObject {
     @Published var showCrossReference: Bool = false
     @Published var showTags: Bool = false
     @Published var showHelp: Bool = false
+    @Published var showAnonymizeSheet: Bool = false
+    @Published var showPresetEditor: Bool = false
+    @Published var isAnonymizing: Bool = false
+    @Published var anonymizeResultMessage: String?
+    @Published var isSplitComparisonMode: Bool = false
+    @Published var windowLevelPresets: [WindowLevelPreset] = WindowLevelPreset.defaultPresets
     @Published var synchronizedScrolling: Bool = false {
         didSet {
             guard synchronizedScrolling, let source = activePanel else { return }
-
-            // If single-panel, auto-expand to 2-panel and assign a same-axis series
-            if layout == .single && allSeries.count > 1 {
-                let sourceIdx = source.seriesIndex
-                let sourceAxis = sourceIdx >= 0 && sourceIdx < allSeries.count
-                    ? allSeries[sourceIdx].dominantAxis : nil
-
-                // Find a different series with the same dominant axis (or just the next series)
-                var bestIdx: Int? = nil
-                for (i, s) in allSeries.enumerated() where i != sourceIdx {
-                    if sourceAxis != nil && s.dominantAxis == sourceAxis {
-                        bestIdx = i
-                        break
-                    }
-                }
-                // Fallback: just pick the next available series
-                if bestIdx == nil {
-                    bestIdx = allSeries.indices.first(where: { $0 != sourceIdx })
-                }
-
-                if let idx = bestIdx {
-                    setLayout(.twoHorizontal)
-                    if panels.count > 1 {
-                        assignSeriesToPanel(panels[1], seriesIndex: idx)
-                    }
-                }
-            }
-
             syncScrollFromPanel(source)
         }
     }
@@ -250,6 +336,46 @@ class DICOMModel: ObservableObject {
         let isSigned: Bool; let isMonochrome1: Bool
     }
     private var imagePixelMeta: [NSURL: PixelMeta] = [:]
+
+    private func invalidateRenderedImageCache(forSeriesIndex seriesIndex: Int) {
+        guard seriesIndex >= 0, seriesIndex < allSeries.count else { return }
+        imageCacheParamsLock.lock()
+        for image in allSeries[seriesIndex].images {
+            let key = image.url as NSURL
+            imageCache.removeObject(forKey: key)
+            imageCacheParams.removeValue(forKey: key)
+        }
+        imageCacheParamsLock.unlock()
+    }
+
+    private func seriesSortPrecedes(_ lhs: DicomSeries, _ rhs: DicomSeries) -> Bool {
+        let lhsKey = studyChronologyKey(lhs)
+        let rhsKey = studyChronologyKey(rhs)
+        if lhsKey != rhsKey { return lhsKey < rhsKey }
+        if lhs.seriesNumber != rhs.seriesNumber { return lhs.seriesNumber < rhs.seriesNumber }
+        return lhs.id < rhs.id
+    }
+
+    private func studyChronologyKey(_ series: DicomSeries) -> String {
+        let date = normalizedDICOMDate(series.studyDate)
+        let time = normalizedDICOMTime(series.studyTime)
+        if date.isEmpty && time.isEmpty { return "999999999999" }
+        return "\(date.isEmpty ? "99999999" : date)\(time.isEmpty ? "9999" : time)"
+    }
+
+    private func normalizedDICOMDate(_ value: String?) -> String {
+        let digits = value?.filter(\.isNumber) ?? ""
+        guard digits.count >= 8 else { return "" }
+        return String(digits.prefix(8))
+    }
+
+    private func normalizedDICOMTime(_ value: String?) -> String {
+        let digits = value?.filter(\.isNumber) ?? ""
+        guard digits.count >= 2 else { return "" }
+        let padded = digits.padding(toLength: 4, withPad: "0", startingAt: 0)
+        return String(padded.prefix(4))
+    }
+
     // Queue for Series Caching
     private let cachingQueue: OperationQueue = {
         let q = OperationQueue()
@@ -264,12 +390,15 @@ class DICOMModel: ObservableObject {
     // Request Token to prevent stale background loads from overriding current view
     private var currentLoadRequestID: UUID = UUID()
     private var lastPrecachedSeriesIndex: Int = -1
+    private let windowLevelPresetsKey = "SmartDICOMViewer.WindowLevelPresets.v1"
+    private let windowLevelPresetsVersionKey = "SmartDICOMViewer.WindowLevelPresets.version"
+    private let currentWindowLevelPresetsVersion = 2
     
     // Series Thumbnails
     @Published var seriesThumbnails: [String: NSImage] = [:]
     private let thumbnailQueue: OperationQueue = {
         let q = OperationQueue()
-        q.maxConcurrentOperationCount = 2
+        q.maxConcurrentOperationCount = 4
         q.qualityOfService = .userInitiated
         return q
     }()
@@ -346,6 +475,7 @@ class DICOMModel: ObservableObject {
         let firstPanel = PanelState()
         self.panels = [firstPanel]
         self.activePanelID = firstPanel.id
+        loadWindowLevelPresets()
 
         // Monitor Shift key globally for group selection overlay
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
@@ -372,6 +502,45 @@ class DICOMModel: ObservableObject {
             timer.invalidate()
         }
         cineTimers.removeAll()
+    }
+
+    func saveWindowLevelPresets(_ presets: [WindowLevelPreset]) {
+        let sanitized = presets
+            .map {
+                WindowLevelPreset(
+                    name: $0.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                    width: max(1, $0.width),
+                    center: $0.center
+                )
+            }
+            .filter { !$0.name.isEmpty }
+        let finalPresets = sanitized.isEmpty ? WindowLevelPreset.defaultPresets : sanitized
+        windowLevelPresets = finalPresets
+        if let data = try? JSONEncoder().encode(finalPresets) {
+            UserDefaults.standard.set(data, forKey: windowLevelPresetsKey)
+            UserDefaults.standard.set(currentWindowLevelPresetsVersion, forKey: windowLevelPresetsVersionKey)
+        }
+    }
+
+    func resetWindowLevelPresetsToDefault() {
+        windowLevelPresets = WindowLevelPreset.defaultPresets
+        UserDefaults.standard.removeObject(forKey: windowLevelPresetsKey)
+        UserDefaults.standard.set(currentWindowLevelPresetsVersion, forKey: windowLevelPresetsVersionKey)
+    }
+
+    private func loadWindowLevelPresets() {
+        let storedVersion = UserDefaults.standard.integer(forKey: windowLevelPresetsVersionKey)
+        guard storedVersion >= currentWindowLevelPresetsVersion else {
+            saveWindowLevelPresets(WindowLevelPreset.defaultPresets)
+            return
+        }
+        guard let data = UserDefaults.standard.data(forKey: windowLevelPresetsKey),
+              let decoded = try? JSONDecoder().decode([WindowLevelPreset].self, from: data),
+              !decoded.isEmpty else {
+            windowLevelPresets = WindowLevelPreset.defaultPresets
+            return
+        }
+        windowLevelPresets = decoded
     }
     
     // Helper for Thumbnail Preview
@@ -413,66 +582,23 @@ class DICOMModel: ObservableObject {
     // Asynchronous Series Thumbnail
     func requestSeriesThumbnail(for series: DicomSeries) {
         if seriesThumbnails[series.id] != nil { return }
-        // Pick middle image
-        guard !series.images.isEmpty else { return }
-        let midIndex = series.images.count / 2
-        let url = series.images[midIndex].url
+        guard let selectedImage = series.thumbnailImageContext else { return }
+        let url = selectedImage.url
         
         thumbnailQueue.addOperation { [weak self] in
             guard let self = self else { return }
             if self.seriesThumbnails[series.id] != nil { return }
 
-            // Multi-frame: extract first frame thumbnail with minimal I/O
-            let selectedImage = series.images[series.images.count / 2]
             if selectedImage.numberOfFrames > 1 {
-                // Read only the first 2MB to find the first JPEG frame
-                // without memory-mapping the entire multi-GB file
-                if let fh = try? FileHandle(forReadingFrom: selectedImage.url) {
-                    let headerData = fh.readData(ofLength: 2 * 1024 * 1024)
-                    fh.closeFile()
-
-                    // Find first encapsulated JPEG frame: search for Item tag (FFFE,E000)
-                    // after PixelData tag (7FE0,0010)
-                    headerData.withUnsafeBytes { raw in
-                        guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                        let count = headerData.count
-                        // Find PixelData tag
-                        var pdOffset = -1
-                        for i in 132..<(count - 12) {
-                            if base[i] == 0xE0 && base[i+1] == 0x7F && base[i+2] == 0x10 && base[i+3] == 0x00 {
-                                pdOffset = i
-                                break
-                            }
-                        }
-                        guard pdOffset >= 0 else { return }
-
-                        // Skip VR + length to reach items
-                        var pos = pdOffset + 4
-                        if pos + 2 <= count && base[pos] == 0x4F && (base[pos+1] == 0x42 || base[pos+1] == 0x57) {
-                            pos += 8  // Explicit VR OB/OW
-                        } else {
-                            pos += 4  // Implicit VR
-                        }
-
-                        // Skip Basic Offset Table (first item)
-                        if pos + 8 <= count && base[pos] == 0xFE && base[pos+1] == 0xFF && base[pos+2] == 0x00 && base[pos+3] == 0xE0 {
-                            let botLen = Int(base[pos+4]) | (Int(base[pos+5]) << 8) | (Int(base[pos+6]) << 16) | (Int(base[pos+7]) << 24)
-                            pos = pos + 8 + botLen
-                        }
-
-                        // Read first actual frame item
-                        if pos + 8 <= count && base[pos] == 0xFE && base[pos+1] == 0xFF && base[pos+2] == 0x00 && base[pos+3] == 0xE0 {
-                            let frameLen = Int(base[pos+4]) | (Int(base[pos+5]) << 8) | (Int(base[pos+6]) << 16) | (Int(base[pos+7]) << 24)
-                            let frameStart = pos + 8
-                            if frameStart + frameLen <= count {
-                                let jpegData = headerData[frameStart..<(frameStart + frameLen)]
-                                if let thumb = NSImage(data: jpegData) {
-                                    DispatchQueue.main.async {
-                                        self.seriesThumbnails[series.id] = thumb
-                                    }
-                                }
-                            }
-                        }
+                if let decoder = MultiFrameDecoder(url: selectedImage.url),
+                   decoder.effectiveFrameCount > 0,
+                   let cgImage = decoder.frameCGImage(at: decoder.effectiveFrameCount / 2) {
+                    let thumb = NSImage(
+                        cgImage: cgImage,
+                        size: NSSize(width: cgImage.width, height: cgImage.height)
+                    )
+                    DispatchQueue.main.async {
+                        self.seriesThumbnails[series.id] = self.autoLevelImage(thumb) ?? thumb
                     }
                 }
                 return
@@ -490,6 +616,18 @@ class DICOMModel: ObservableObject {
                     return elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.intValue ?? 
                            Int(elements.first(where: { $0.tag == DicomTag(group: g, element: e) })?.stringValue ?? "")
                 }
+                func getDouble(_ g: UInt16, _ e: UInt16) -> Double? {
+                    guard let element = elements.first(where: { $0.tag == DicomTag(group: g, element: e) }) else {
+                        return nil
+                    }
+                    if let text = element.stringValue?.split(separator: "\\").first {
+                        return Double(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
+                    if let intValue = element.intValue {
+                        return Double(intValue)
+                    }
+                    return nil
+                }
                 
                 let w = getInt(0x0028, 0x0011) ?? 512
                 let h = getInt(0x0028, 0x0010) ?? 512
@@ -497,6 +635,8 @@ class DICOMModel: ObservableObject {
                 let samples = getInt(0x0028, 0x0002) ?? 1
                 let signed = (getInt(0x0028, 0x0103) ?? 0) == 1
                 let photo = elements.first(where: { $0.tag == DicomTag(group: 0x0028, element: 0x0004) })?.stringValue ?? "MONOCHROME2"
+                let rescaleSlope = getDouble(0x0028, 0x1053) ?? 1.0
+                let rescaleIntercept = getDouble(0x0028, 0x1052) ?? 0.0
                 
                 // Compression Check: compares File Size vs Expected Raw Size OR Transfer Syntax OR Encapsulation
                 let bytesPerPixel = (bits > 8 ? 2 : 1) * samples
@@ -554,15 +694,29 @@ class DICOMModel: ObservableObject {
                 
                 // Raw Render PATH
                 
-                // Auto W/L
-                let (minVal, maxVal) = self.computeMinMax(data: pd, isSigned: signed, bits: bits)
-                var ww = maxVal - minVal
+                let usesFixedThumbnailWindow = self.usesFixedThumbnailWindowLevel(for: series)
+                let thumbnailWL: (width: Double, center: Double)
+                if let preset = self.defaultWindowLevelPreset(for: series) {
+                    thumbnailWL = (width: preset.width, center: preset.center)
+                } else if usesFixedThumbnailWindow {
+                    thumbnailWL = (width: 80, center: 40)
+                } else {
+                    let (minVal, maxVal) = self.computeMinMax(data: pd, isSigned: signed, bits: bits)
+                    thumbnailWL = self.thumbnailWindowLevel(for: series, min: minVal, max: maxVal)
+                }
+                var ww = thumbnailWL.width
                 if ww == 0 { ww = 1 }
-                let wc = minVal + (ww / 2.0)
+                let wc = thumbnailWL.center
                 let winBottom = wc - (ww / 2.0)
                 
-                // Render (Stateless Logic)
-                let totalPixels = w * h
+                let maxThumbnailDimension = 256
+                let largestDimension = max(w, h)
+                let scale = largestDimension > maxThumbnailDimension
+                    ? Double(maxThumbnailDimension) / Double(largestDimension)
+                    : 1.0
+                let outputWidth = max(1, Int((Double(w) * scale).rounded()))
+                let outputHeight = max(1, Int((Double(h) * scale).rounded()))
+                let totalPixels = outputWidth * outputHeight
 
                 // Use CFMutableData so the backing store is retained by CGDataProvider,
                 // preventing dangling-pointer reads when the CGImage outlives this scope.
@@ -573,31 +727,50 @@ class DICOMModel: ObservableObject {
                 if bits > 8 {
                      pd.withUnsafeBytes { raw in
                          if let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt16.self) {
-                             let count = min(totalPixels, pd.count/2)
-                             for i in 0..<count {
-                                 var val: Double = 0
-                                 if signed { val = Double(Int16(bitPattern: ptr[i])) }
-                                 else { val = Double(ptr[i]) }
-
-                                 var norm = (val - winBottom) / ww
-                                 if norm < 0 { norm = 0 }
-                                 if norm > 1 { norm = 1 }
-                                 if photo == "MONOCHROME1" { norm = 1.0 - norm }
-                                 bufferPtr[i] = UInt8(norm * 255.0)
+                             let count = pd.count / 2
+                             for y in 0..<outputHeight {
+                                 let sourceY = min(h - 1, Int(Double(y) / scale))
+                                 for x in 0..<outputWidth {
+                                     let sourceX = min(w - 1, Int(Double(x) / scale))
+                                     let sourceIndex = sourceY * w + sourceX
+                                     guard sourceIndex < count else { continue }
+                                     let outputIndex = y * outputWidth + x
+                                     var val: Double = 0
+                                     if signed { val = Double(Int16(bitPattern: ptr[sourceIndex])) }
+                                     else { val = Double(ptr[sourceIndex]) }
+                                     bufferPtr[outputIndex] = self.thumbnailDisplayByte(
+                                        storedValue: val,
+                                        rescaleSlope: rescaleSlope,
+                                        rescaleIntercept: rescaleIntercept,
+                                        windowBottom: winBottom,
+                                        windowWidth: ww,
+                                        isMonochrome1: photo == "MONOCHROME1"
+                                     )
+                                 }
                              }
                          }
                      }
                 } else {
                      pd.withUnsafeBytes { raw in
                          if let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                             let count = min(totalPixels, pd.count)
-                             for i in 0..<count {
-                                 let val = Double(ptr[i])
-                                 var norm = (val - winBottom) / ww
-                                 if norm < 0 { norm = 0 }
-                                 if norm > 1 { norm = 1 }
-                                 if photo == "MONOCHROME1" { norm = 1.0 - norm }
-                                 bufferPtr[i] = UInt8(norm * 255.0)
+                             let count = pd.count
+                             for y in 0..<outputHeight {
+                                 let sourceY = min(h - 1, Int(Double(y) / scale))
+                                 for x in 0..<outputWidth {
+                                     let sourceX = min(w - 1, Int(Double(x) / scale))
+                                     let sourceIndex = sourceY * w + sourceX
+                                     guard sourceIndex < count else { continue }
+                                     let outputIndex = y * outputWidth + x
+                                     let val = Double(ptr[sourceIndex])
+                                     bufferPtr[outputIndex] = self.thumbnailDisplayByte(
+                                        storedValue: val,
+                                        rescaleSlope: rescaleSlope,
+                                        rescaleIntercept: rescaleIntercept,
+                                        windowBottom: winBottom,
+                                        windowWidth: ww,
+                                        isMonochrome1: photo == "MONOCHROME1"
+                                     )
+                                 }
                              }
                          }
                      }
@@ -605,17 +778,18 @@ class DICOMModel: ObservableObject {
 
                 let colorSpace = CGColorSpaceCreateDeviceGray()
                 if let provider = CGDataProvider(data: cfData),
-                   let cg = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
-                                    bytesPerRow: w, space: colorSpace,
+                   let cg = CGImage(width: outputWidth, height: outputHeight, bitsPerComponent: 8, bitsPerPixel: 8,
+                                    bytesPerRow: outputWidth, space: colorSpace,
                                     bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
                                     provider: provider, decode: nil, shouldInterpolate: false,
                                     intent: .defaultIntent) {
-                    let rawImg = NSImage(cgImage: cg, size: NSSize(width: Double(w), height: Double(h)))
-                    // Apply Auto-Leveling to raw render as well (handles outliers/padding)
-                    let leveledImg = self.autoLevelImage(rawImg) ?? rawImg
+                    let rawImg = NSImage(cgImage: cg, size: NSSize(width: Double(outputWidth), height: Double(outputHeight)))
+                    let finalImg = usesFixedThumbnailWindow
+                        ? rawImg
+                        : (self.autoLevelImage(rawImg) ?? rawImg)
 
                     DispatchQueue.main.async {
-                        self.seriesThumbnails[series.id] = leveledImg
+                        self.seriesThumbnails[series.id] = finalImg
                     }
                 }
             } catch {
@@ -683,6 +857,8 @@ class DICOMModel: ObservableObject {
     /// Show an Open panel and load the selected DICOM file or folder.
     func openFolder() {
         let panel = NSOpenPanel()
+        panel.title = "Open Linked DICOM Folder"
+        panel.message = "Files are read from their original location; they are not copied into the app."
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -692,6 +868,35 @@ class DICOMModel: ObservableObject {
         ]
         if panel.runModal() == .OK, let url = panel.url {
             load(url: url)
+        }
+    }
+
+    func anonymizeFolder() {
+        anonymizeResultMessage = nil
+        showAnonymizeSheet = true
+    }
+
+    func runAnonymize(sourceURL: URL, destinationURL: URL, patientName: String, patientID: String) {
+        isAnonymizing = true
+        anonymizeResultMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try DICOMAnonymizer.anonymizeFolder(
+                    source: sourceURL,
+                    destination: destinationURL,
+                    patientName: patientName,
+                    patientID: patientID
+                )
+                DispatchQueue.main.async {
+                    self.isAnonymizing = false
+                    self.anonymizeResultMessage = "Complete: \(result.anonymizedFiles) modified, \(result.copiedFiles) copied"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isAnonymizing = false
+                    self.anonymizeResultMessage = "Failed: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -715,6 +920,12 @@ class DICOMModel: ObservableObject {
             self.derivedObjects = []
             self.annotationObjects = []
             self.selectedDerivedObjectID = nil
+            self.layout = .single
+            self.isSplitComparisonMode = false
+            self.fullscreenPanelID = nil
+            let freshPanel = PanelState()
+            self.panels = [freshPanel]
+            self.activePanelID = freshPanel.id
             self.panels.forEach { $0.importedOverlays = [] }
             self.currentSeriesIndex = -1
             self.currentImageIndex = -1
@@ -967,6 +1178,8 @@ class DICOMModel: ObservableObject {
                             var newState = SeriesViewState()
                             newState.windowWidth = ww
                             newState.windowCenter = wc
+                            newState.initialWindowWidth = ww
+                            newState.initialWindowCenter = wc
                             self.seriesStates[seriesUID] = newState
                         }
                         
@@ -1696,7 +1909,7 @@ class DICOMModel: ObservableObject {
 
     // MARK: - Caching Logic
     // Starts caching the entire series in background, prioritized by distance from cursor
-    private func startSeriesCaching(seriesIndex: Int) {
+    private func startSeriesCaching(seriesIndex: Int, centerIndex: Int? = nil) {
         // 1. Pause Caching during Directory Scan to prevent resource starvation
         // The "First Image" is loaded explicitly by loadSingleFile, so we don't need background caching yet.
         if isScanning { return }
@@ -1724,8 +1937,8 @@ class DICOMModel: ObservableObject {
         // Update progress safely
         self.cacheProgress = Double(alreadyCachedCount) / total
         
-        let centerIndex = max(0, currentImageIndex < images.count ? currentImageIndex : 0)
-        let indices = Array(0..<images.count).sorted { abs($0 - centerIndex) < abs($1 - centerIndex) }
+        let priorityCenter = max(0, min(centerIndex ?? currentImageIndex, images.count - 1))
+        let indices = Array(0..<images.count).sorted { abs($0 - priorityCenter) < abs($1 - priorityCenter) }
         
         for idx in indices {
             let context = images[idx]
@@ -1747,7 +1960,7 @@ class DICOMModel: ObservableObject {
                 if self.imageCache.object(forKey: context.url as NSURL) == nil
                     && self.rawDataCache.object(forKey: context.url as NSURL) == nil {
                      
-                     self.cacheImageBackground(url: context.url)
+	                     self.cacheImageBackground(url: context.url)
                      
                      // Increment Progress on Main Thread
                      if !op.isCancelled {
@@ -1763,16 +1976,118 @@ class DICOMModel: ObservableObject {
             }
             cachingQueue.addOperation(op)
         }
+	    }
+
+    func prepareTileImages(for panel: PanelState, indices: [Int]) {
+        guard panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count else { return }
+        guard !indices.isEmpty else { return }
+        let series = allSeries[panel.seriesIndex]
+        let target = targetWindowLevel(for: panel)
+
+        for index in indices {
+            guard index >= 0, index < series.images.count else { continue }
+            let context = series.images[index]
+            guard context.numberOfFrames <= 1 else { continue }
+            if isTileCacheReady(url: context.url, target: target) { continue }
+
+            let op = BlockOperation()
+            op.queuePriority = .veryHigh
+            op.addExecutionBlock { [weak self, weak op] in
+                guard let self, let op, !op.isCancelled else { return }
+                self.cacheImageBackground(url: context.url, targetWindowLevel: target)
+                if !op.isCancelled {
+                    DispatchQueue.main.async {
+                        self.objectWillChange.send()
+                    }
+                }
+            }
+            cachingQueue.addOperation(op)
+        }
     }
-    
-    // Clean up legacy calls
+
+    private func targetWindowLevel(for panel: PanelState) -> (ww: Double, wc: Double)? {
+        if panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count {
+            let uid = allSeries[panel.seriesIndex].id
+            if let state = seriesStates[uid],
+               let ww = state.windowWidth,
+               let wc = state.windowCenter,
+               ww > 0 {
+                return (ww, wc)
+            }
+        }
+        if panel.windowWidth > 0 {
+            return (panel.windowWidth, panel.windowCenter)
+        }
+        return nil
+    }
+
+    private func isTileCacheReady(url: URL, target: (ww: Double, wc: Double)?) -> Bool {
+        let key = url as NSURL
+        if dcmtkCache.object(forKey: key) != nil {
+            return true
+        }
+        let hasRenderedImage = imageCache.object(forKey: key) != nil
+        if rawDataCache.object(forKey: key) != nil && !hasRenderedImage {
+            return false
+        }
+        guard hasRenderedImage else { return false }
+        guard let target else { return true }
+        imageCacheParamsLock.lock()
+        let params = imageCacheParams[key]
+        imageCacheParamsLock.unlock()
+        guard let params else { return false }
+        return abs(params.0 - target.ww) < 0.1 && abs(params.1 - target.wc) < 0.1
+    }
+	    
+	    // Clean up legacy calls
     private func prefetchAdjacentImages() {
          // No-op or trigger re-prioritization if we implemented it.
          // Calling startSeriesCaching here would trigger the "Same Series" check and return immediately.
          startSeriesCaching(seriesIndex: self.currentSeriesIndex)
     }
     
-    private func cacheImageBackground(url: URL) {
+    private func cacheImageBackground(url: URL, targetWindowLevel: (ww: Double, wc: Double)? = nil) {
+        if let dcmObj = DCMTKImageObject(path: url.path) {
+            var width: Int = 0
+            var height: Int = 0
+            var depth: Int = 0
+            var samples: Int = 0
+            var isSigned: ObjCBool = false
+            if let rawData = dcmObj.getRawDataWidth(&width, height: &height, bitDepth: &depth, samples: &samples, isSigned: &isSigned) {
+                let raw = rawData as Data
+                let defaultWW: Double
+                let defaultWC: Double
+                if let targetWindowLevel {
+                    defaultWW = targetWindowLevel.ww
+                    defaultWC = targetWindowLevel.wc
+                } else {
+                    let fileWW = dcmObj.getWindowWidth()
+                    let fileWC = dcmObj.getWindowCenter()
+                    if fileWW > 0 {
+                        defaultWW = fileWW
+                        defaultWC = fileWC
+                    } else {
+                        let (minVal, maxVal) = computeMinMax(data: raw, isSigned: isSigned.boolValue, bits: depth)
+                        defaultWW = max(1.0, maxVal - minVal)
+                        defaultWC = minVal + (defaultWW / 2.0)
+                    }
+                }
+                rawDataCache.setObject(rawData as NSData, forKey: url as NSURL)
+                dcmtkCache.setObject(dcmObj, forKey: url as NSURL)
+                imageCacheParamsLock.lock()
+                imagePixelMeta[url as NSURL] = PixelMeta(width: width, height: height, bitDepth: depth, samples: samples, isSigned: isSigned.boolValue, isMonochrome1: false)
+                imageCacheParams[url as NSURL] = (defaultWW, defaultWC)
+                imageCacheParamsLock.unlock()
+                if let rendered = dcmObj.renderImage(withWidth: 0, height: 0, ww: defaultWW, wc: defaultWC) {
+                    imageCache.setObject(rendered, forKey: url as NSURL)
+                } else if let rendered = renderImage(width: width, height: height, pixelData: raw, ww: defaultWW, wc: defaultWC,
+                                                      bits: depth, spp: samples, signed: isSigned.boolValue, mono1: false) {
+                    imageCache.setObject(rendered, forKey: url as NSURL)
+                }
+                return
+            }
+        }
+
         // Reduced version of loading just to populate cache
         do {
              let data = try Data(contentsOf: url)
@@ -1809,7 +2124,39 @@ class DICOMModel: ObservableObject {
              }
              
              if let r = finalRaw {
-                 self.rawDataCache.setObject(r as NSData, forKey: url as NSURL)
+                 if let rawResult = self.extractRawPixelData(from: url) {
+                     let renderWW: Double
+                     let renderWC: Double
+                     if let targetWindowLevel {
+                         renderWW = targetWindowLevel.ww
+                         renderWC = targetWindowLevel.wc
+                     } else {
+                         let (minVal, maxVal) = self.computeMinMax(data: rawResult.pixelData, isSigned: rawResult.isSigned, bits: rawResult.bitDepth)
+                         renderWW = max(1.0, maxVal - minVal)
+                         renderWC = minVal + (renderWW / 2.0)
+                     }
+                     self.rawDataCache.setObject(rawResult.pixelData as NSData, forKey: url as NSURL)
+                     self.imageCacheParamsLock.lock()
+                     self.imagePixelMeta[url as NSURL] = PixelMeta(width: rawResult.width,
+                                                                    height: rawResult.height,
+                                                                    bitDepth: rawResult.bitDepth,
+                                                                    samples: rawResult.samples,
+                                                                    isSigned: rawResult.isSigned,
+                                                                    isMonochrome1: rawResult.isMonochrome1)
+                     self.imageCacheParams[url as NSURL] = (renderWW, renderWC)
+                     self.imageCacheParamsLock.unlock()
+                     if let rendered = self.renderImage(width: rawResult.width, height: rawResult.height,
+                                                        pixelData: rawResult.pixelData,
+                                                        ww: renderWW, wc: renderWC,
+                                                        bits: rawResult.bitDepth,
+                                                        spp: rawResult.samples,
+                                                        signed: rawResult.isSigned,
+                                                        mono1: rawResult.isMonochrome1) {
+                         self.imageCache.setObject(rendered, forKey: url as NSURL)
+                     }
+                 } else {
+                     self.rawDataCache.setObject(r as NSData, forKey: url as NSURL)
+                 }
              } else {
                  // Compressed / Native failed -> Use DCMTK
                  if let img = DCMTKHelper.convertDICOM(toNSImage: url.path) {
@@ -1820,11 +2167,29 @@ class DICOMModel: ObservableObject {
                      var signed: ObjCBool = false
                      if let j2kData = DCMTKHelper.decodeJPEG2000DICOM(
                          url.path, width: &w, height: &h,
-                         bitDepth: &d, samples: &s, isSigned: &signed) {
-                         self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
-                     }
-                 }
-             }
+	                         bitDepth: &d, samples: &s, isSigned: &signed) {
+	                         self.rawDataCache.setObject(j2kData as NSData, forKey: url as NSURL)
+                             let renderWW: Double
+                             let renderWC: Double
+                             if let targetWindowLevel {
+                                 renderWW = targetWindowLevel.ww
+                                 renderWC = targetWindowLevel.wc
+                             } else {
+                                 let (minVal, maxVal) = self.computeMinMax(data: j2kData, isSigned: signed.boolValue, bits: d)
+                                 renderWW = max(1.0, maxVal - minVal)
+                                 renderWC = minVal + (renderWW / 2.0)
+                             }
+                             self.imageCacheParamsLock.lock()
+                             self.imagePixelMeta[url as NSURL] = PixelMeta(width: w, height: h, bitDepth: d, samples: s, isSigned: signed.boolValue, isMonochrome1: false)
+                             self.imageCacheParams[url as NSURL] = (renderWW, renderWC)
+                             self.imageCacheParamsLock.unlock()
+                             if let rendered = self.renderImage(width: w, height: h, pixelData: j2kData, ww: renderWW, wc: renderWC,
+                                                                bits: d, spp: s, signed: signed.boolValue, mono1: false) {
+                                 self.imageCache.setObject(rendered, forKey: url as NSURL)
+                             }
+	                     }
+	                 }
+	             }
         } catch { }
     }
     
@@ -1873,10 +2238,7 @@ class DICOMModel: ObservableObject {
                     let sDesc = first?.displaySeriesDescription(baseDescription: baseDesc) ?? baseDesc
                     seriesList.append(DicomSeries(id: key, seriesNumber: sNum, seriesDescription: sDesc, images: sortedImages))
                 }
-                seriesList.sort {
-                    if $0.seriesNumber != $1.seriesNumber { return $0.seriesNumber < $1.seriesNumber }
-                    return $0.id < $1.id
-                }
+                seriesList.sort { self.seriesSortPrecedes($0, $1) }
                 
                 DispatchQueue.main.async {
                     // Capture current selection UID before replacing list
@@ -2253,6 +2615,14 @@ class DICOMModel: ObservableObject {
 
             // StudyInstanceUID (0020,000D)
             let studyInstanceUID = getStr(g: 0x0020, e: 0x000D) ?? parser.findTagRaw(DicomTag(group: 0x0020, element: 0x000D))
+            let studyDescription = getStr(g: 0x0008, e: 0x1030) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x1030))
+            let studyDate = getStr(g: 0x0008, e: 0x0020) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0020))
+            let studyTime = getStr(g: 0x0008, e: 0x0030) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0030))
+            let accessionNumber = getStr(g: 0x0008, e: 0x0050) ?? parser.findTagRaw(DicomTag(group: 0x0008, element: 0x0050))
+            let patientName = getStr(g: 0x0010, e: 0x0010) ?? parser.findTagRaw(DicomTag(group: 0x0010, element: 0x0010))
+            let patientID = getStr(g: 0x0010, e: 0x0020) ?? parser.findTagRaw(DicomTag(group: 0x0010, element: 0x0020))
+            let patientSex = getStr(g: 0x0010, e: 0x0040) ?? parser.findTagRaw(DicomTag(group: 0x0010, element: 0x0040))
+            let patientAge = getStr(g: 0x0010, e: 0x1010) ?? parser.findTagRaw(DicomTag(group: 0x0010, element: 0x1010))
 
             // NumberOfFrames (0028,0008) — multi-frame/cine detection
             let numberOfFrames = getInt(g: 0x0028, e: 0x0008) ?? 1
@@ -2272,6 +2642,15 @@ class DICOMModel: ObservableObject {
                 spacingBetweenSlices: spacingBetweenSlices,
                 frameOfReferenceUID: frameOfReferenceUID,
                 studyInstanceUID: studyInstanceUID,
+                studyDescription: studyDescription,
+                studyDate: studyDate,
+                studyTime: studyTime,
+                accessionNumber: accessionNumber,
+                patientName: patientName,
+                patientID: patientID,
+                patientSex: patientSex,
+                patientAge: patientAge,
+                modality: modality,
                 numberOfFrames: numberOfFrames
             )
         } catch { return nil }
@@ -2383,6 +2762,7 @@ class DICOMModel: ObservableObject {
     /// Assign a series to a specific panel and load its first image
     func assignSeriesToPanel(_ panel: PanelState, seriesIndex: Int) {
         guard seriesIndex >= 0, seriesIndex < allSeries.count else { return }
+        let series = allSeries[seriesIndex]
         // Stop any active cine playback
         stopCinePlayback(panel)
         panel.seriesIndex = seriesIndex
@@ -2390,12 +2770,29 @@ class DICOMModel: ObservableObject {
         panel.panelMode = .slice2D
         panel.windowWidth = 0  // Reset W/L for new series assignment
         panel.windowCenter = 0
+        panel.initialWindowWidth = 0
+        panel.initialWindowCenter = 0
         // Reset multi-frame state
         panel.isMultiFrame = false
         panel.numberOfFrames = 0
         panel.currentFrameIndex = 0
 
-        let series = allSeries[seriesIndex]
+        if seriesStates[series.id]?.windowWidth == nil,
+           let preset = defaultWindowLevelPreset(for: series) {
+            panel.windowWidth = preset.width
+            panel.windowCenter = preset.center
+            panel.initialWindowWidth = preset.width
+            panel.initialWindowCenter = preset.center
+            var state = seriesStates[series.id] ?? SeriesViewState()
+            state.windowWidth = preset.width
+            state.windowCenter = preset.center
+            state.initialWindowWidth = preset.width
+            state.initialWindowCenter = preset.center
+            seriesStates[series.id] = state
+        }
+
+        startSeriesCaching(seriesIndex: seriesIndex, centerIndex: 0)
+
         if let first = series.images.first {
             setImportedOverlays(for: panel, imageContext: first)
             // Check if this is a multi-frame DICOM
@@ -2406,6 +2803,77 @@ class DICOMModel: ObservableObject {
             }
         }
         updatePanelInfoStrings(panel)
+    }
+
+    func defaultWindowLevelPreset(for series: DicomSeries) -> WindowLevelPreset? {
+        if isMIPWindowLevelSeries(series) {
+            return WindowLevelPreset(name: "MIP", width: 1000, center: 250)
+        }
+
+        let modality = series.modality?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+        guard modality == "CT" else {
+            return nil
+        }
+        return WindowLevelPreset(name: "Brain", width: 80, center: 40)
+    }
+
+    func thumbnailWindowLevel(for series: DicomSeries, min minValue: Double, max maxValue: Double) -> (width: Double, center: Double) {
+        if let preset = defaultWindowLevelPreset(for: series) {
+            return (preset.width, preset.center)
+        }
+        if usesFixedThumbnailWindowLevel(for: series) {
+            return (width: 80, center: 40)
+        }
+        let width = Swift.max(1.0, maxValue - minValue)
+        return (width, minValue + width / 2.0)
+    }
+
+    func thumbnailDisplayByte(
+        storedValue: Double,
+        rescaleSlope: Double,
+        rescaleIntercept: Double,
+        windowBottom: Double,
+        windowWidth: Double,
+        isMonochrome1: Bool
+    ) -> UInt8 {
+        let rescaledValue = storedValue * rescaleSlope + rescaleIntercept
+        let safeWindowWidth = max(1.0, windowWidth)
+        var normalized = (rescaledValue - windowBottom) / safeWindowWidth
+        normalized = min(1.0, max(0.0, normalized))
+        if isMonochrome1 {
+            normalized = 1.0 - normalized
+        }
+        return UInt8(normalized * 255.0)
+    }
+
+    private func usesFixedThumbnailWindowLevel(for series: DicomSeries) -> Bool {
+        if isMIPWindowLevelSeries(series) { return true }
+
+        let modality = series.modality?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+        if modality == "CT" { return true }
+
+        let searchable = [
+            series.seriesDescription,
+            series.studyDescription ?? "",
+            modality
+        ]
+            .joined(separator: " ")
+            .lowercased()
+
+        return searchable.contains("ct")
+    }
+
+    private func isMIPWindowLevelSeries(_ series: DicomSeries) -> Bool {
+        let searchable = [
+            series.seriesDescription,
+            series.studyDescription ?? ""
+        ]
+            .joined(separator: " ")
+            .uppercased()
+
+        return searchable.contains("MIP")
+            || searchable.contains("(MAP)")
+            || searchable.contains(" MAP")
     }
 
     // MARK: - W/L Helpers
@@ -2440,6 +2908,7 @@ class DICOMModel: ObservableObject {
             panel.imageIndex = newIndex
             updateSpatialMetadataFromSeries(panel)
             loadFileForPanel(panel, imageContext: series.images[newIndex])
+            startSeriesCaching(seriesIndex: panel.seriesIndex, centerIndex: newIndex)
         }
     }
 
@@ -2453,16 +2922,22 @@ class DICOMModel: ObservableObject {
             panel.imageIndex = newIndex
             updateSpatialMetadataFromSeries(panel)
             loadFileForPanel(panel, imageContext: series.images[newIndex])
+            startSeriesCaching(seriesIndex: panel.seriesIndex, centerIndex: newIndex)
             if synchronizedScrolling { syncScrollFromPanel(panel) }
         }
     }
 
-    /// Reset view: zoom/pan to default and auto W/L
+    /// Reset view: zoom/pan to default and restore the initial W/L baseline.
     func resetViewForPanel(_ panel: PanelState?) {
         guard let panel = panel else { return }
-        panel.scale = 1.0
-        panel.translation = .zero
-        autoWindowLevelForPanel(panel)
+        let sameSeriesPanels = panels.filter { $0.seriesIndex == panel.seriesIndex }
+        let targets = sameSeriesPanels.isEmpty ? [panel] : sameSeriesPanels
+        for target in targets {
+            target.scale = 1.0
+            target.translation = .zero
+        }
+        resetWindowLevelForPanel(panel)
+        objectWillChange.send()
     }
 
     /// Fit image to window (reset zoom/pan only, keep W/L)
@@ -2538,45 +3013,19 @@ class DICOMModel: ObservableObject {
         }
     }
 
-    /// Set the viewer layout and resize the panels array accordingly
+    /// Set the viewer layout. Layout buttons are instance tile grids for the active series.
     func setLayout(_ newLayout: ViewerLayout) {
-        let oldCount = panels.count
-        let newCount = newLayout.panelCount
+        ensurePanelsInitialized()
+        isSplitComparisonMode = false
         layout = newLayout
 
-        if newCount > oldCount {
-            for i in oldCount..<newCount {
-                let newPanel = PanelState()
-                panels.append(newPanel)
-                // Auto-assign series to newly created panels
-                if i < allSeries.count {
-                    assignSeriesToPanel(newPanel, seriesIndex: i)
-                }
-            }
-        } else if newCount < oldCount {
-            // Keep the first N panels, reset and remove the rest
-            let removed = panels.suffix(from: newCount)
-            for panel in removed {
+        if panels.count > 1 {
+            let keptPanel = activePanel ?? panels.first
+            for panel in panels where panel.id != keptPanel?.id {
                 stopCinePlayback(panel)
                 panel.reset()
             }
-            panels = Array(panels.prefix(newCount))
-
-            // Clean up decoders for URLs not used by remaining panels
-            let activeURLs: Set<URL> = Set(panels.compactMap { p in
-                guard p.seriesIndex >= 0, p.seriesIndex < allSeries.count else { return nil }
-                let s = allSeries[p.seriesIndex]
-                guard p.imageIndex >= 0, p.imageIndex < s.images.count else { return nil }
-                return s.images[p.imageIndex].url
-            })
-            decoderLock.lock()
-            let orphanedDecoders = multiFrameDecoders.filter { !activeURLs.contains($0.key) }
-            for key in orphanedDecoders.keys { multiFrameDecoders.removeValue(forKey: key) }
-            decoderLock.unlock()
-            for (_, decoder) in orphanedDecoders {
-                decoder.stopRingBuffer()
-                decoder.clearCache()
-            }
+            panels = keptPanel.map { [$0] } ?? []
         }
 
         // Ensure active panel is still valid
@@ -2588,12 +3037,44 @@ class DICOMModel: ObservableObject {
         if let fsID = fullscreenPanelID, !panels.contains(where: { $0.id == fsID }) {
             fullscreenPanelID = nil
         }
+
+        if let panel = activePanel, panel.seriesIndex >= 0 {
+            startSeriesCaching(seriesIndex: panel.seriesIndex, centerIndex: currentSliceIndex(for: panel))
+        }
+    }
+
+    /// Opens a two-panel comparison surface. Each panel accepts a dropped series.
+    func setupOneByTwoComparison() {
+        ensurePanelsInitialized()
+        layout = .single
+        isSplitComparisonMode = true
+        fullscreenPanelID = nil
+        showCrossReference = true
+        synchronizedScrolling = true
+
+        if panels.count == 1 {
+            panels.append(PanelState())
+        } else if panels.count > 2 {
+            let keptActive = activePanel ?? panels.first
+            let first = panels[0]
+            let second = panels.first(where: { $0.id != first.id && $0.id == keptActive?.id }) ?? panels[1]
+            let keepIDs: Set<UUID> = [first.id, second.id]
+            for panel in panels where !keepIDs.contains(panel.id) {
+                stopCinePlayback(panel)
+                panel.reset()
+            }
+            panels = [first, second]
+        }
+
+        if !panels.contains(where: { $0.id == activePanelID }) {
+            activePanelID = panels.first?.id ?? UUID()
+        }
     }
 
     /// One-click MPR layout: switches to 2x2 and configures panels as Axial + Sagittal + Coronal + MIP.
     /// Uses the active panel's series (or first available series) for all four panels.
     func setupMPRLayout() {
-        setLayout(.quad)
+        setLayout(.twoByTwo)
 
         // Determine series to use (active panel's series or first available)
         let seriesIdx: Int
@@ -3049,6 +3530,10 @@ class DICOMModel: ObservableObject {
                             let params = self.imageCacheParams[url as NSURL]
                             self.imageCacheParamsLock.unlock()
                             if let (cachedWW, cachedWC) = params {
+                                if panel.initialWindowWidth <= 0 {
+                                    panel.initialWindowWidth = cachedWW
+                                    panel.initialWindowCenter = cachedWC
+                                }
                                 panel.windowWidth = cachedWW
                                 panel.windowCenter = cachedWC
                                 // First load from cache — save W/L to seriesStates so subsequent slices stay consistent.
@@ -3058,6 +3543,8 @@ class DICOMModel: ObservableObject {
                                         var state = self.seriesStates[uid] ?? SeriesViewState()
                                         state.windowWidth = cachedWW
                                         state.windowCenter = cachedWC
+                                        state.initialWindowWidth = state.initialWindowWidth ?? cachedWW
+                                        state.initialWindowCenter = state.initialWindowCenter ?? cachedWC
                                         self.seriesStates[uid] = state
                                     }
                                 }
@@ -3145,6 +3632,10 @@ class DICOMModel: ObservableObject {
                         panel.isSigned = isSigned.boolValue
 
                         // Preserve user W/L when scrolling within same series
+                        if panel.initialWindowWidth <= 0 {
+                            panel.initialWindowWidth = ww
+                            panel.initialWindowCenter = wc
+                        }
                         if preservedWW > 0 {
                             panel.windowWidth = preservedWW
                             panel.windowCenter = preservedWC
@@ -3165,6 +3656,8 @@ class DICOMModel: ObservableObject {
                                     var state = self.seriesStates[uid] ?? SeriesViewState()
                                     state.windowWidth = ww
                                     state.windowCenter = wc
+                                    state.initialWindowWidth = state.initialWindowWidth ?? ww
+                                    state.initialWindowCenter = state.initialWindowCenter ?? wc
                                     self.seriesStates[uid] = state
                                 }
                             }
@@ -3217,6 +3710,10 @@ class DICOMModel: ObservableObject {
                         panel.isSigned = j2kSigned.boolValue
 
                         // Preserve user W/L when scrolling within same series
+                        if panel.initialWindowWidth <= 0 {
+                            panel.initialWindowWidth = autoWW
+                            panel.initialWindowCenter = autoWC
+                        }
                         let renderWW = preservedWW > 0 ? preservedWW : autoWW
                         let renderWC = preservedWW > 0 ? preservedWC : autoWC
                         panel.windowWidth = renderWW
@@ -3231,11 +3728,13 @@ class DICOMModel: ObservableObject {
                                 if panel.seriesIndex >= 0, panel.seriesIndex < self.allSeries.count {
                                     let uid = self.allSeries[panel.seriesIndex].id
                                     if self.seriesStates[uid]?.windowWidth == nil {
-                                        var state = self.seriesStates[uid] ?? SeriesViewState()
-                                        state.windowWidth = autoWW
-                                        state.windowCenter = autoWC
-                                        self.seriesStates[uid] = state
-                                    }
+	                                        var state = self.seriesStates[uid] ?? SeriesViewState()
+	                                        state.windowWidth = autoWW
+	                                        state.windowCenter = autoWC
+	                                        state.initialWindowWidth = state.initialWindowWidth ?? autoWW
+	                                        state.initialWindowCenter = state.initialWindowCenter ?? autoWC
+	                                        self.seriesStates[uid] = state
+	                                    }
                                 }
                             }
                         }
@@ -3285,6 +3784,10 @@ class DICOMModel: ObservableObject {
                             panel.isSigned = rawSigned
                             panel.isMonochrome1 = rawMono1
 
+                            if panel.initialWindowWidth <= 0 {
+                                panel.initialWindowWidth = autoWW
+                                panel.initialWindowCenter = autoWC
+                            }
                             let renderWW = preservedWW > 0 ? preservedWW : autoWW
                             let renderWC = preservedWW > 0 ? preservedWC : autoWC
                             panel.windowWidth = renderWW
@@ -3299,11 +3802,13 @@ class DICOMModel: ObservableObject {
                                     if panel.seriesIndex >= 0, panel.seriesIndex < self.allSeries.count {
                                         let uid = self.allSeries[panel.seriesIndex].id
                                         if self.seriesStates[uid]?.windowWidth == nil {
-                                            var state = self.seriesStates[uid] ?? SeriesViewState()
-                                            state.windowWidth = autoWW
-                                            state.windowCenter = autoWC
-                                            self.seriesStates[uid] = state
-                                        }
+	                                            var state = self.seriesStates[uid] ?? SeriesViewState()
+	                                            state.windowWidth = autoWW
+	                                            state.windowCenter = autoWC
+	                                            state.initialWindowWidth = state.initialWindowWidth ?? autoWW
+	                                            state.initialWindowCenter = state.initialWindowCenter ?? autoWC
+	                                            self.seriesStates[uid] = state
+	                                        }
                                     }
                                 }
                             }
@@ -3336,20 +3841,57 @@ class DICOMModel: ObservableObject {
         panel.loadingQueue.addOperation(op)
     }
 
-    /// Adjust W/L for a specific panel
-    func adjustWindowLevelForPanel(_ panel: PanelState, deltaWidth: Double, deltaCenter: Double) {
-        panel.windowWidth = max(1.0, panel.windowWidth + deltaWidth)
-        panel.windowCenter += deltaCenter
+    private func resetWindowLevelForPanel(_ panel: PanelState) {
+        if panel.initialWindowWidth > 0 {
+            setWindowLevelForSeries(panel, width: panel.initialWindowWidth, center: panel.initialWindowCenter)
+        } else if panel.seriesIndex >= 0,
+                  panel.seriesIndex < allSeries.count,
+                  let state = seriesStates[allSeries[panel.seriesIndex].id],
+                  let initialWidth = state.initialWindowWidth,
+                  let initialCenter = state.initialWindowCenter,
+                  initialWidth > 0 {
+            setWindowLevelForSeries(panel, width: initialWidth, center: initialCenter)
+        } else {
+            autoWindowLevelForPanel(panel)
+        }
+    }
 
-        // Persist to seriesStates so precaching & other images use the same W/L
-        if panel.seriesIndex >= 0, panel.seriesIndex < allSeries.count {
-            let uid = allSeries[panel.seriesIndex].id
+    /// Adjust W/L for a panel and any other panel/tile using the same series.
+    func adjustWindowLevelForPanel(_ panel: PanelState, deltaWidth: Double, deltaCenter: Double) {
+        let newWidth = max(1.0, panel.windowWidth + deltaWidth)
+        let newCenter = panel.windowCenter + deltaCenter
+        setWindowLevelForSeries(panel, width: newWidth, center: newCenter)
+    }
+
+    private func setWindowLevelForSeries(_ sourcePanel: PanelState, width: Double, center: Double) {
+        let newWidth = max(1.0, width)
+        let newCenter = center
+        let seriesIndex = sourcePanel.seriesIndex
+
+        if seriesIndex >= 0, seriesIndex < allSeries.count {
+            let uid = allSeries[seriesIndex].id
             var state = seriesStates[uid] ?? SeriesViewState()
-            state.windowWidth = panel.windowWidth
-            state.windowCenter = panel.windowCenter
+            if state.initialWindowWidth == nil, sourcePanel.initialWindowWidth > 0 {
+                state.initialWindowWidth = sourcePanel.initialWindowWidth
+                state.initialWindowCenter = sourcePanel.initialWindowCenter
+            }
+            state.windowWidth = newWidth
+            state.windowCenter = newCenter
             seriesStates[uid] = state
+            invalidateRenderedImageCache(forSeriesIndex: seriesIndex)
         }
 
+        let targets = panels.filter { $0.seriesIndex == seriesIndex }
+        let renderTargets = targets.isEmpty ? [sourcePanel] : targets
+        for target in renderTargets {
+            target.windowWidth = newWidth
+            target.windowCenter = newCenter
+            renderWindowLevelForPanel(target)
+        }
+        objectWillChange.send()
+    }
+
+    private func renderWindowLevelForPanel(_ panel: PanelState) {
         switch panel.panelMode {
         case .slice2D:
             if let dcmObj = panel.dcmtkImage {
@@ -3408,7 +3950,37 @@ class DICOMModel: ObservableObject {
             let (minVal, maxVal) = computeMinMax(data: data, isSigned: panel.isSigned, bits: panel.bitDepth)
             let newWW = maxVal - minVal
             let newWC = minVal + (newWW / 2.0)
-            adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
+            setWindowLevelForSeries(panel, width: newWW, center: newWC)
+        }
+    }
+
+    func applyWindowLevelPreset(_ preset: WindowLevelPreset, to panel: PanelState) {
+        setWindowLevelForSeries(panel, width: preset.width, center: preset.center)
+    }
+
+    func applyWindowLevelPresetShortcut(keyCode: UInt16, to panel: PanelState? = nil) -> Bool {
+        guard let index = windowLevelPresetIndex(forNumericKeypadKeyCode: keyCode),
+              index >= 0,
+              index < windowLevelPresets.count else {
+            return false
+        }
+        guard let targetPanel = panel ?? activePanel else { return false }
+        applyWindowLevelPreset(windowLevelPresets[index], to: targetPanel)
+        return true
+    }
+
+    func windowLevelPresetIndex(forNumericKeypadKeyCode keyCode: UInt16) -> Int? {
+        switch keyCode {
+        case 83: return 0 // keypad 1
+        case 84: return 1 // keypad 2
+        case 85: return 2 // keypad 3
+        case 86: return 3 // keypad 4
+        case 87: return 4 // keypad 5
+        case 88: return 5 // keypad 6
+        case 89: return 6 // keypad 7
+        case 91: return 7 // keypad 8
+        case 92: return 8 // keypad 9
+        default: return nil
         }
     }
 
@@ -3482,24 +4054,20 @@ class DICOMModel: ObservableObject {
         return (minVal, maxVal)
     }
 
-    /// Auto W/L from a rectangular ROI in pixel coordinates
+    /// Auto W/L from an elliptical ROI in pixel coordinates
     func autoWindowLevelForPanelROI(_ panel: PanelState, rect: CGRect) {
-        guard let data = panel.rawPixelData, panel.imageWidth > 0 else { return }
-        let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
-        let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
-        let rawRect = CGRect(x: rect.minX * scaleX, y: rect.minY * scaleY,
-                             width: rect.width * scaleX, height: rect.height * scaleY)
-        let (minVal, maxVal) = computeMinMaxInRect(data: data, width: panel.imageWidth, rect: rawRect, isSigned: panel.isSigned, bits: panel.bitDepth)
-        let newWW = max(1.0, maxVal - minVal)
-        let newWC = minVal + (newWW / 2.0)
-        adjustWindowLevelForPanel(panel, deltaWidth: newWW - panel.windowWidth, deltaCenter: newWC - panel.windowCenter)
+        guard let stats = computeROIStats(panel: panel, rect: rect) else { return }
+        let newWW = max(1.0, stats.max - stats.min)
+        let newWC = stats.min + (newWW / 2.0)
+        setWindowLevelForSeries(panel, width: newWW, center: newWC)
     }
 
-    /// Compute HU statistics for a pixel-coordinate rectangle on a panel
+    /// Compute HU statistics for a pixel-coordinate ellipse on a panel
     func computeROIStats(panel: PanelState, rect: CGRect) -> (mean: Double, max: Double, min: Double, stdDev: Double, count: Int)? {
         guard let data = panel.rawPixelData else { return nil }
         let w = panel.imageWidth
         let h = panel.imageHeight
+        guard w > 0, h > 0 else { return nil }
         // Scale ROI rect from display-image space to raw-pixel space
         let scaleX = panel.displayImageWidth > 0 ? CGFloat(panel.imageWidth) / panel.displayImageWidth : 1.0
         let scaleY = panel.displayImageHeight > 0 ? CGFloat(panel.imageHeight) / panel.displayImageHeight : 1.0
@@ -3510,6 +4078,10 @@ class DICOMModel: ObservableObject {
         let maxX = min(w - 1, Int(rawRect.maxX))
         let maxY = min(h - 1, Int(rawRect.maxY))
         guard maxX > minX, maxY > minY else { return nil }
+        let centerX = (Double(minX) + Double(maxX)) / 2.0
+        let centerY = (Double(minY) + Double(maxY)) / 2.0
+        let radiusX = max(0.5, Double(maxX - minX) / 2.0)
+        let radiusY = max(0.5, Double(maxY - minY) / 2.0)
 
         var values: [Double] = []
         values.reserveCapacity((maxX - minX) * (maxY - minY))
@@ -3517,6 +4089,9 @@ class DICOMModel: ObservableObject {
         data.withUnsafeBytes { raw in
             for py in minY...maxY {
                 for px in minX...maxX {
+                    let dx = (Double(px) - centerX) / radiusX
+                    let dy = (Double(py) - centerY) / radiusY
+                    guard dx * dx + dy * dy <= 1.0 else { continue }
                     let index = py * w + px
                     var val: Double = 0
                     if panel.bitDepth > 8 {
@@ -3572,9 +4147,10 @@ class DICOMModel: ObservableObject {
         guard index >= 0, index < images.count else { return nil }
         let url = images[index].url
 
-        // Determine target W/L: use panel's current W/L so thumbnails match the active view
-        let panelWW = panel.windowWidth
-        let panelWC = panel.windowCenter
+        // Determine target W/L from the series state so every tile uses the same contrast.
+        let target = targetWindowLevel(for: panel)
+        let panelWW = target?.ww ?? panel.windowWidth
+        let panelWC = target?.wc ?? panel.windowCenter
         let hasUserWL = panelWW > 0
 
         // Try DCMTK object cache first — best quality, can render with panel's W/L
@@ -3586,22 +4162,33 @@ class DICOMModel: ObservableObject {
 
         // Try raw data cache — can render with panel's W/L
         if hasUserWL, let raw = rawDataCache.object(forKey: url as NSURL) as Data? {
-            let w = panel.imageWidth > 0 ? panel.imageWidth : 512
-            let h = panel.imageHeight > 0 ? panel.imageHeight : 512
+            imageCacheParamsLock.lock()
+            let meta = imagePixelMeta[url as NSURL]
+            imageCacheParamsLock.unlock()
+            let w = meta?.width ?? (panel.imageWidth > 0 ? panel.imageWidth : 512)
+            let h = meta?.height ?? (panel.imageHeight > 0 ? panel.imageHeight : 512)
+            let bits = meta?.bitDepth ?? panel.bitDepth
+            let samples = meta?.samples ?? panel.samples
+            let signed = meta?.isSigned ?? panel.isSigned
+            let mono1 = meta?.isMonochrome1 ?? panel.isMonochrome1
             if let rendered = renderImage(width: w, height: h, pixelData: raw, ww: panelWW, wc: panelWC,
-                                          bits: panel.bitDepth, spp: panel.samples, signed: panel.isSigned, mono1: panel.isMonochrome1) {
+                                          bits: bits, spp: samples, signed: signed, mono1: mono1) {
                 return rendered
             }
         }
 
-        // No user W/L set — check if pre-rendered cache matches or use it as-is
+        // Only use pre-rendered cache when W/L is unknown or matches the target.
         if let cached = imageCache.object(forKey: url as NSURL) {
             if !hasUserWL {
                 return cached
             }
-            // User has W/L but we couldn't re-render above (both dcmtk and raw evicted);
-            // return stale image rather than nothing
-            return cached
+            imageCacheParamsLock.lock()
+            let params = imageCacheParams[url as NSURL]
+            imageCacheParamsLock.unlock()
+            if let params, abs(params.0 - panelWW) < 0.1, abs(params.1 - panelWC) < 0.1 {
+                return cached
+            }
+            return nil
         }
 
         // Last resort: DCMTK with stored or default W/L
@@ -3706,6 +4293,7 @@ class DICOMModel: ObservableObject {
                 panel.imageIndex = idx
                 updateSpatialMetadataFromSeries(panel)
                 loadFileForPanel(panel, imageContext: series.images[idx])
+                startSeriesCaching(seriesIndex: panel.seriesIndex, centerIndex: idx)
             }
         case .mprSagittal, .mprCoronal:
             let total = totalSliceCount(for: panel)
@@ -4071,6 +4659,10 @@ class DICOMModel: ObservableObject {
             loadMPRSlice(for: panel)
 
         case .mip:
+            panel.windowWidth = 1000
+            panel.windowCenter = 250
+            panel.initialWindowWidth = 1000
+            panel.initialWindowCenter = 250
             if let seriesID = allSeries[safe: panel.seriesIndex]?.id,
                let vol = volumeCacheGet(seriesID) {
                 panel.mipSlabPosition = vol.depth / 2
@@ -4109,9 +4701,8 @@ class DICOMModel: ObservableObject {
             if panel.mipSlabThickness < 1 { panel.mipSlabThickness = 10 }
             if panel.mipSlabThickness > volume.depth { panel.mipSlabThickness = volume.depth }
 
-            // Use panel's W/L (same as axial slices), fall back to initial values
-            let ww = panel.windowWidth > 0 ? panel.windowWidth : (panel.initialWindowWidth > 0 ? panel.initialWindowWidth : 2000)
-            let wc = (panel.windowWidth > 0) ? panel.windowCenter : (panel.initialWindowWidth > 0 ? panel.initialWindowCenter : 500)
+            let ww = panel.windowWidth > 0 ? panel.windowWidth : (panel.initialWindowWidth > 0 ? panel.initialWindowWidth : 1000)
+            let wc = (panel.windowWidth > 0) ? panel.windowCenter : (panel.initialWindowWidth > 0 ? panel.initialWindowCenter : 250)
 
             BenchmarkLogger.shared.start("mip_render")
 

@@ -5,7 +5,8 @@
 set -e
 
 # Configuration
-APP_NAME="OpenDicomViewer"
+EXECUTABLE_NAME="OpenDicomViewer"
+APP_NAME="Smart DICOM Viewer"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$APP_NAME.app"
 
@@ -24,7 +25,8 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
 
 # Create Info.plist if not exists (or copy)
 if [ -f "scripts/Info.plist" ]; then
@@ -37,17 +39,50 @@ else
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>$APP_NAME</string>
+    <string>$EXECUTABLE_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.example.$APP_NAME</string>
+    <string>com.smartdicomviewer.app</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>1.5.0</string>
     <key>CFBundleVersion</key>
     <string>6</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DICOM File</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>dcm</string>
+                <string>dicom</string>
+                <string>ima</string>
+            </array>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DICOM Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

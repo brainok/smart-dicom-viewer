@@ -24,35 +24,35 @@ final class PanelStateTests: XCTestCase {
         XCTAssertEqual(ViewerLayout.single.columns, 1)
         XCTAssertEqual(ViewerLayout.single.panelCount, 1)
 
-        XCTAssertEqual(ViewerLayout.twoHorizontal.rows, 1)
-        XCTAssertEqual(ViewerLayout.twoHorizontal.columns, 2)
-        XCTAssertEqual(ViewerLayout.twoHorizontal.panelCount, 2)
+        XCTAssertEqual(ViewerLayout.twoByTwo.rows, 2)
+        XCTAssertEqual(ViewerLayout.twoByTwo.columns, 2)
+        XCTAssertEqual(ViewerLayout.twoByTwo.panelCount, 4)
 
-        XCTAssertEqual(ViewerLayout.twoVertical.rows, 2)
-        XCTAssertEqual(ViewerLayout.twoVertical.columns, 1)
-        XCTAssertEqual(ViewerLayout.twoVertical.panelCount, 2)
+        XCTAssertEqual(ViewerLayout.threeByThree.rows, 3)
+        XCTAssertEqual(ViewerLayout.threeByThree.columns, 3)
+        XCTAssertEqual(ViewerLayout.threeByThree.panelCount, 9)
 
-        XCTAssertEqual(ViewerLayout.quad.rows, 2)
-        XCTAssertEqual(ViewerLayout.quad.columns, 2)
-        XCTAssertEqual(ViewerLayout.quad.panelCount, 4)
+        XCTAssertEqual(ViewerLayout.fourByFour.rows, 4)
+        XCTAssertEqual(ViewerLayout.fourByFour.columns, 4)
+        XCTAssertEqual(ViewerLayout.fourByFour.panelCount, 16)
     }
 
     func testViewerLayoutRawValues() {
         XCTAssertEqual(ViewerLayout.single.rawValue, "1\u{00d7}1")       // "1x1" with multiplication sign
-        XCTAssertEqual(ViewerLayout.twoHorizontal.rawValue, "2\u{00d7}1")
-        XCTAssertEqual(ViewerLayout.twoVertical.rawValue, "1\u{00d7}2")
-        XCTAssertEqual(ViewerLayout.quad.rawValue, "2\u{00d7}2")
+        XCTAssertEqual(ViewerLayout.twoByTwo.rawValue, "2\u{00d7}2")
+        XCTAssertEqual(ViewerLayout.threeByThree.rawValue, "3\u{00d7}3")
+        XCTAssertEqual(ViewerLayout.fourByFour.rawValue, "4\u{00d7}4")
     }
 
     func testViewerLayoutIconNames() {
-        XCTAssertEqual(ViewerLayout.single.iconName, "rectangle")
-        XCTAssertEqual(ViewerLayout.twoHorizontal.iconName, "rectangle.split.2x1")
-        XCTAssertEqual(ViewerLayout.twoVertical.iconName, "rectangle.split.1x2")
-        XCTAssertEqual(ViewerLayout.quad.iconName, "rectangle.split.2x2")
+        XCTAssertEqual(ViewerLayout.single.iconName, "square")
+        XCTAssertEqual(ViewerLayout.twoByTwo.iconName, "square.grid.2x2")
+        XCTAssertEqual(ViewerLayout.threeByThree.iconName, "square.grid.3x3")
+        XCTAssertEqual(ViewerLayout.fourByFour.iconName, "square.grid.3x3.fill")
     }
 
     func testViewerLayoutIdentifiable() {
-        let layout = ViewerLayout.quad
+        let layout = ViewerLayout.twoByTwo
         XCTAssertEqual(layout.id, layout.rawValue)
     }
 

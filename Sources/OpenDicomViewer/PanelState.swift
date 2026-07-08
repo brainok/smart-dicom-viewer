@@ -5,7 +5,7 @@
 // viewer architecture.
 //
 // Key types:
-//   ViewerLayout       — Layout configuration (1x1, 2x1, 1x2, 2x2)
+//   ViewerLayout       — Layout configuration (1x1 through 4x4)
 //   NavigationDirection — Arrow key navigation actions
 //   PanelMode          — Display mode per panel (2D slice, MPR sagittal/coronal, MIP)
 //   PanelState         — Observable state for a single viewer panel, including:
@@ -23,34 +23,33 @@ import DCMTKWrapper
 // MARK: - Layout Configuration
 enum ViewerLayout: String, CaseIterable, Identifiable {
     case single = "1×1"
-    case twoHorizontal = "2×1"
-    case twoVertical = "1×2"
-    case quad = "2×2"
+    case twoByTwo = "2×2"
+    case threeByThree = "3×3"
+    case fourByFour = "4×4"
 
     var id: String { rawValue }
 
     var rows: Int {
         switch self {
-        case .single, .twoHorizontal: return 1
-        case .twoVertical, .quad: return 2
+        case .single: return 1
+        case .twoByTwo: return 2
+        case .threeByThree: return 3
+        case .fourByFour: return 4
         }
     }
 
     var columns: Int {
-        switch self {
-        case .single, .twoVertical: return 1
-        case .twoHorizontal, .quad: return 2
-        }
+        rows
     }
 
     var panelCount: Int { rows * columns }
 
     var iconName: String {
         switch self {
-        case .single:          return "rectangle"
-        case .twoHorizontal:   return "rectangle.split.2x1"
-        case .twoVertical:     return "rectangle.split.1x2"
-        case .quad:            return "rectangle.split.2x2"
+        case .single:        return "square"
+        case .twoByTwo:      return "square.grid.2x2"
+        case .threeByThree:  return "square.grid.3x3"
+        case .fourByFour:    return "square.grid.3x3.fill"
         }
     }
 }
@@ -68,6 +67,27 @@ enum PanelMode: String, CaseIterable, Identifiable {
     case mip = "MIP"
 
     var id: String { rawValue }
+}
+
+struct WindowLevelPreset: Identifiable, Equatable, Codable {
+    var name: String
+    var width: Double
+    var center: Double
+
+    var id: String { name }
+    var detail: String { "WL \(Int(center))  WW \(Int(width))" }
+
+    static let defaultPresets: [WindowLevelPreset] = [
+        WindowLevelPreset(name: "Brain", width: 80, center: 40),
+        WindowLevelPreset(name: "ASPECTS", width: 35, center: 35),
+        WindowLevelPreset(name: "ASPECTS 2", width: 40, center: 40),
+        WindowLevelPreset(name: "MIP", width: 1000, center: 250),
+        WindowLevelPreset(name: "Lung", width: 1500, center: -600),
+        WindowLevelPreset(name: "Bone", width: 2500, center: 500),
+        WindowLevelPreset(name: "Angio", width: 600, center: 200)
+    ]
+
+    static let presets = defaultPresets
 }
 
 // MARK: - Active Tool

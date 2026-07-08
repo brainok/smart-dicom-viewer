@@ -5,7 +5,9 @@
 # Licensed under the MIT License. See LICENSE for details.
 set -e
 
-APP_NAME="OpenDicomViewer"
+EXECUTABLE_NAME="OpenDicomViewer"
+APP_NAME="Smart DICOM Viewer"
+RELEASE_DIR="release/v2.0"
 SIGNING_IDENTITY="Developer ID Application: Joon Heo (KCRAUWJ5MM)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
@@ -32,7 +34,7 @@ mkdir -p "${MACOS_DIR}"
 mkdir -p "${RESOURCES_DIR}"
 
 echo "Copying Executable..."
-cp "${BUILD_DIR}/${APP_NAME}" "${MACOS_DIR}/"
+cp "${BUILD_DIR}/${EXECUTABLE_NAME}" "${MACOS_DIR}/"
 
 echo "Copying App Icon..."
 cp "AppIcon.icns" "${RESOURCES_DIR}/"
@@ -47,10 +49,12 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>${APP_NAME}</string>
+    <string>${EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>com.opendicomviewer.app</string>
+    <string>com.smartdicomviewer.app</string>
     <key>CFBundleName</key>
+    <string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key>
     <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -62,21 +66,50 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <string>14.0</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DICOM File</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>dcm</string>
+                <string>dicom</string>
+                <string>ima</string>
+            </array>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DICOM Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>Smart DICOM Viewer needs access to open DICOM files.</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>Smart DICOM Viewer needs access to open DICOM files.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>OpenDicomViewer needs access to open DICOM files.</string>
+    <string>Smart DICOM Viewer needs access to open DICOM files.</string>
 </dict>
 </plist>
 EOF
 
 if $NOTARIZE; then
     echo "Code signing with Developer ID..."
-    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${APP_NAME}"
+    codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
     codesign --force --options runtime --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
     codesign --verify --deep --strict "${APP_BUNDLE}"
     echo "Signature OK"
@@ -88,7 +121,8 @@ fi
 echo "Successfully created ${APP_BUNDLE}"
 
 # --- Create DMG for distribution ---
-DMG_NAME="${APP_NAME}.dmg"
+mkdir -p "${RELEASE_DIR}"
+DMG_NAME="${RELEASE_DIR}/${APP_NAME}.dmg"
 DMG_TEMP="dmg_tmp"
 
 echo "Creating DMG at ${DMG_NAME}..."
@@ -105,6 +139,23 @@ hdiutil create -volname "${APP_NAME}" \
     -quiet
 
 rm -rf "${DMG_TEMP}"
+
+if command -v sips >/dev/null 2>&1 &&
+   command -v DeRez >/dev/null 2>&1 &&
+   command -v Rez >/dev/null 2>&1 &&
+   command -v SetFile >/dev/null 2>&1 &&
+   [[ -f "Smart-dicom-viewer-icon.png" ]]; then
+    echo "Applying custom DMG icon..."
+    DMG_ICON_TMP_DIR="$(mktemp -d)"
+    DMG_ICON_PNG="${DMG_ICON_TMP_DIR}/DmgIcon.png"
+    DMG_ICON_RSRC="${DMG_ICON_TMP_DIR}/DmgIcon.rsrc"
+    sips -z 512 512 "Smart-dicom-viewer-icon.png" --out "${DMG_ICON_PNG}" >/dev/null
+    sips -i "${DMG_ICON_PNG}" >/dev/null
+    DeRez -only icns "${DMG_ICON_PNG}" > "${DMG_ICON_RSRC}"
+    Rez -append "${DMG_ICON_RSRC}" -o "${DMG_NAME}"
+    SetFile -a C "${DMG_NAME}"
+    rm -rf "${DMG_ICON_TMP_DIR}"
+fi
 
 if $NOTARIZE; then
     echo "Submitting ${DMG_NAME} for notarization..."

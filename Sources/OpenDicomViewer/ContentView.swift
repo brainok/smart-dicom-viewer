@@ -19,6 +19,22 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import QuartzCore
+import AppKit
+
+private func makeSeriesDragProvider(index: Int, suggestedName: String? = nil) -> NSItemProvider {
+    let text = "\(index)"
+    let provider = NSItemProvider(object: text as NSString)
+    provider.suggestedName = suggestedName
+    provider.registerDataRepresentation(forTypeIdentifier: DragPasteboardTypes.seriesIndexIdentifier, visibility: .all) { completion in
+        completion(Data(text.utf8), nil)
+        return nil
+    }
+    provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .all) { completion in
+        completion(Data(text.utf8), nil)
+        return nil
+    }
+    return provider
+}
 
 
 
@@ -30,7 +46,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(model: model, columnVisibility: $columnVisibility)
-            .navigationSplitViewColumnWidth(min: 250, ideal: 300)
+            .navigationSplitViewColumnWidth(min: 320, ideal: 340, max: 760)
             .toolbar(removing: .sidebarToggle)
         } detail: {
             HStack(spacing: 0) {
@@ -42,13 +58,17 @@ struct ContentView: View {
                 ZStack(alignment: .topLeading) {
                     // Multi-panel container replaces old single DetailView
                     MultiPanelContainer(model: model, isFocused: $isFocused)
-                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                            _ = handleDrop(providers: providers)
-                            return true
+                        .onDrop(of: DropItemResolver.acceptedTypes, isTargeted: nil) { providers in
+                            handleDrop(providers: providers)
                         }
                         .onTapGesture {
                             isFocused = true
                         }
+
+                    PatientTopBanner(model: model)
+                        .padding(.leading, 82)
+                        .padding(.top, 9)
+                        .zIndex(70)
 
                     // Floating controls overlay
                     VStack {
@@ -65,6 +85,7 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .help("Show Sidebar")
+                                .padding(.leading, 70)
                             }
 
                             Spacer()
@@ -97,6 +118,9 @@ struct ContentView: View {
                         Spacer()
                     }
                 }
+                .onDrop(of: DropItemResolver.acceptedTypes, isTargeted: nil) { providers in
+                    handleDrop(providers: providers)
+                }
             }
         }
         // Keyboard Handlers — route through active panel
@@ -105,25 +129,25 @@ struct ContentView: View {
         .onAppear { isFocused = true }
         .onKeyPress(.leftArrow) {
             if let panel = model.activePanel {
-                model.navigatePanel(panel, direction: .prevSeries)
+                model.navigatePanelByOffset(panel, offset: -1)
             }
             return .handled
         }
         .onKeyPress(.rightArrow) {
             if let panel = model.activePanel {
-                model.navigatePanel(panel, direction: .nextSeries)
+                model.navigatePanelByOffset(panel, offset: 1)
             }
             return .handled
         }
         .onKeyPress(.upArrow) {
             if let panel = model.activePanel {
-                model.navigatePanel(panel, direction: .prevImage)
+                model.navigatePanel(panel, direction: .prevSeries)
             }
             return .handled
         }
         .onKeyPress(.downArrow) {
             if let panel = model.activePanel {
-                model.navigatePanel(panel, direction: .nextImage)
+                model.navigatePanel(panel, direction: .nextSeries)
             }
             return .handled
         }
@@ -191,6 +215,12 @@ struct ContentView: View {
         .sheet(isPresented: $model.showHelp) {
             HelpView()
         }
+        .sheet(isPresented: $model.showAnonymizeSheet) {
+            AnonymizeFolderDialog(model: model)
+        }
+        .sheet(isPresented: $model.showPresetEditor) {
+            WindowLevelPresetEditor(model: model)
+        }
         .preferredColorScheme(.dark)
         .background(WindowAccessor(model: model))
     }
@@ -198,17 +228,23 @@ struct ContentView: View {
     // MARK: - Handlers
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
-            if provider.canLoadObject(ofClass: URL.self) {
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url = url {
-                        DispatchQueue.main.async { model.load(url: url) }
-                    }
-                }
-                return true
-            }
+        DropItemResolver.handle(
+            providers: providers,
+            onSeriesIndex: { index in assignDroppedSeries(index) },
+            onURL: { url in model.load(url: url) }
+        )
+    }
+
+    private func assignDroppedSeries(_ index: Int) {
+        guard index >= 0, index < model.allSeries.count else { return }
+        model.clearSelectedDerivedObject()
+        if let panel = model.activePanel {
+            model.assignSeriesToPanel(panel, seriesIndex: index)
+        } else if let first = model.allSeries[index].images.first {
+            model.currentSeriesIndex = index
+            model.currentImageIndex = 0
+            model.loadSingleFile(first.url)
         }
-        return false
     }
 
     private func cyclePanelForward() {
@@ -220,9 +256,70 @@ struct ContentView: View {
     }
 }
 
+struct PatientTopBanner: View {
+    @ObservedObject var model: DICOMModel
+
+    private var patientLine: String? {
+        guard let panel = model.activePanel,
+              panel.seriesIndex >= 0,
+              panel.seriesIndex < model.allSeries.count else { return nil }
+        let series = model.allSeries[panel.seriesIndex]
+        var parts: [String] = []
+        if let id = clean(series.patientID) { parts.append("ID \(id)") }
+        if let name = clean(series.patientName) { parts.append(name) }
+        if let sex = clean(series.patientSex) { parts.append(sex.uppercased()) }
+        if let age = formattedAge(series.patientAge) { parts.append(age) }
+        return parts.isEmpty ? nil : parts.joined(separator: "  |  ")
+    }
+
+    var body: some View {
+        if let patientLine {
+            Text(patientLine)
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.82))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.36))
+                .cornerRadius(6)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func clean(_ value: String?) -> String? {
+        let cleaned = value?
+            .replacingOccurrences(of: "^", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let cleaned, !cleaned.isEmpty else { return nil }
+        return cleaned
+    }
+
+    private func formattedAge(_ value: String?) -> String? {
+        guard let cleaned = clean(value) else { return nil }
+        let suffix = cleaned.suffix(1).uppercased()
+        let digits = cleaned.dropLast().filter(\.isNumber)
+        if let number = Int(digits), ["Y", "M", "W", "D"].contains(suffix) {
+            return "\(number)\(suffix)"
+        }
+        return cleaned
+    }
+}
+
 struct SidebarView: View {
     @ObservedObject var model: DICOMModel
     @Binding var columnVisibility: NavigationSplitViewVisibility
+    @State private var selectedStudyID: String? = nil
+    @State private var isStudyColumnCollapsed = false
+    @AppStorage("seriesThumbnailSize") private var seriesThumbnailSize: Double = 136
+    @AppStorage("seriesColumnCount") private var seriesColumnCount: Int = 1
+
+    private var seriesColumnWidth: CGFloat {
+        let columns = max(1, min(2, seriesColumnCount))
+        let padding: CGFloat = 34
+        let gap: CGFloat = columns == 2 ? 10 : 0
+        return max(150, CGFloat(columns) * (CGFloat(seriesThumbnailSize) + padding) + gap)
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -235,8 +332,24 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Hide Sidebar")
+
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isStudyColumnCollapsed.toggle() } }) {
+                    Image(systemName: isStudyColumnCollapsed ? "rectangle.leftthird.inset.filled" : "rectangle.leadinghalf.inset.filled")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isStudyColumnCollapsed ? "Show Study Column" : "Collapse Study Column")
                 
                 Spacer()
+
+                Button(action: { model.anonymizeFolder() }) {
+                    Image(systemName: "person.crop.circle.badge.minus")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Anonymize Folder")
                 
                 Button(action: openFile) {
                     HStack(spacing: 6) {
@@ -247,14 +360,34 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Open DICOM Folder")
+                .help("Open Linked DICOM Folder")
             }
-            .padding(.horizontal, 16)
+            .padding(.leading, 84)
+            .padding(.trailing, 16)
             .padding(.vertical, 12)
             // Remove background or make it very subtle
             // .background(Color.black.opacity(0.4))
             
-            SeriesListView(model: model)
+            HStack(spacing: 0) {
+                if isStudyColumnCollapsed {
+                    CollapsedStudyColumn(
+                        selectedStudyID: $selectedStudyID,
+                        isCollapsed: $isStudyColumnCollapsed
+                    )
+                    .frame(width: 38)
+                } else {
+                    StudyListView(
+                        model: model,
+                        selectedStudyID: $selectedStudyID,
+                        isCollapsed: $isStudyColumnCollapsed
+                    )
+                    .frame(width: 158)
+                    Divider()
+                }
+
+                SeriesListView(model: model, selectedStudyID: $selectedStudyID)
+                    .frame(width: seriesColumnWidth)
+            }
         }
     }
     
@@ -263,12 +396,482 @@ struct SidebarView: View {
     }
 }
 
+struct AnonymizeFolderDialog: View {
+    @ObservedObject var model: DICOMModel
+    @State private var sourceURL: URL?
+    @State private var destinationURL: URL?
+    @State private var initial = "YSH"
+    @State private var studyNo = ""
+
+    private var canAnonymize: Bool {
+        sourceURL != nil && destinationURL != nil && !initial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !model.isAnonymizing
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .center, spacing: 18) {
+                HStack(spacing: 12) {
+                    Circle().fill(Color.red).frame(width: 18, height: 18)
+                    Circle().fill(Color.yellow).frame(width: 18, height: 18)
+                    Circle().fill(Color.green).frame(width: 18, height: 18)
+                }
+
+                Text("Anonymize Folder")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 16) {
+                pathRow(title: "Source", url: sourceURL, action: chooseSource)
+                pathRow(title: "Destination", url: destinationURL, action: chooseDestination)
+
+                HStack(spacing: 16) {
+                    Text("Initial")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 120, alignment: .leading)
+
+                    TextField("YSH", text: $initial)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 18, weight: .semibold))
+                }
+
+                HStack(spacing: 16) {
+                    Text("Study No.")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 120, alignment: .leading)
+
+                    TextField("Study number", text: $studyNo)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 18, weight: .semibold))
+                }
+            }
+
+            if let message = model.anonymizeResultMessage {
+                Text(message)
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(message.hasPrefix("Failed") ? .red : .secondary)
+                    .lineLimit(2)
+            }
+
+            HStack {
+                Button("Cancel") {
+                    model.showAnonymizeSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                if model.isAnonymizing {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button("Anonymize") {
+                    guard let sourceURL, let destinationURL else { return }
+                    model.runAnonymize(
+                        sourceURL: sourceURL,
+                        destinationURL: destinationURL,
+                        patientName: initial.trimmingCharacters(in: .whitespacesAndNewlines),
+                        patientID: studyNo.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canAnonymize)
+            }
+        }
+        .padding(28)
+        .frame(width: 860)
+        .background(Color(white: 0.11))
+    }
+
+    private func pathRow(title: String, url: URL?, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 16) {
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 120, alignment: .leading)
+
+            Text(url?.path ?? "Not selected")
+                .font(.system(size: 16, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.10))
+                .cornerRadius(7)
+
+            Button("Choose...", action: action)
+                .font(.system(size: 16, weight: .semibold))
+        }
+    }
+
+    private func chooseSource() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose DICOM Folder"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            sourceURL = url
+            if destinationURL == nil {
+                destinationURL = url.deletingLastPathComponent().appendingPathComponent("\(url.lastPathComponent)_anonymized")
+            }
+        }
+    }
+
+    private func chooseDestination() {
+        let panel = NSSavePanel()
+        panel.title = "Choose Output Folder"
+        panel.prompt = "Choose"
+        panel.canCreateDirectories = true
+        if let sourceURL {
+            panel.directoryURL = sourceURL.deletingLastPathComponent()
+            panel.nameFieldStringValue = "\(sourceURL.lastPathComponent)_anonymized"
+        }
+        if panel.runModal() == .OK {
+            destinationURL = panel.url
+        }
+    }
+}
+
+struct WindowLevelPresetEditor: View {
+    @ObservedObject var model: DICOMModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var presets: [WindowLevelPreset]
+
+    init(model: DICOMModel) {
+        self.model = model
+        _presets = State(initialValue: model.windowLevelPresets)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                Circle().fill(Color.red).frame(width: 14, height: 14)
+                Circle().fill(Color.yellow).frame(width: 14, height: 14)
+                Circle().fill(Color.green).frame(width: 14, height: 14)
+                Text("Window / Level Presets")
+                    .font(.system(size: 22, weight: .bold))
+            }
+
+            VStack(spacing: 8) {
+                HStack {
+                    Text("Name").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("WL").frame(width: 90)
+                    Text("WW").frame(width: 90)
+                    Spacer().frame(width: 34)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+                ForEach(presets.indices, id: \.self) { index in
+                    HStack(spacing: 10) {
+                        TextField("Preset", text: $presets[index].name)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("WL", value: $presets[index].center, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                        TextField("WW", value: $presets[index].width, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                        Button {
+                            presets.remove(at: index)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            HStack {
+                Button {
+                    presets.append(WindowLevelPreset(name: "New Preset", width: 80, center: 40))
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+
+                Button("Defaults") {
+                    presets = WindowLevelPreset.defaultPresets
+                }
+
+                Spacer()
+
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+
+                Button("Save") {
+                    model.saveWindowLevelPresets(presets)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(26)
+        .frame(width: 620)
+        .background(Color(white: 0.11))
+    }
+}
+
+struct StudyListItem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let seriesIndices: [Int]
+}
+
+enum StudyBrowserBuilder {
+    static func studies(for allSeries: [DicomSeries]) -> [StudyListItem] {
+        var orderedKeys: [String] = []
+        var grouped: [String: [Int]] = [:]
+
+        for (index, series) in allSeries.enumerated() {
+            let uid = series.studyInstanceUID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = uid?.isEmpty == false ? uid! : "unknown-study-\(orderedKeys.count)"
+            if grouped[key] == nil {
+                orderedKeys.append(key)
+            }
+            grouped[key, default: []].append(index)
+        }
+
+        return orderedKeys.enumerated().compactMap { offset, key in
+            guard let indices = grouped[key], let firstIndex = indices.first else { return nil }
+            let series = allSeries[firstIndex]
+            return StudyListItem(
+                id: key,
+                title: studyTitle(series: series, offset: offset, total: orderedKeys.count),
+                subtitle: studySubtitle(series: series, seriesCount: indices.count),
+                seriesIndices: indices
+            )
+        }
+    }
+
+    private static func studyTitle(series: DicomSeries, offset: Int, total: Int) -> String {
+        var parts: [String] = ["Study \(offset + 1)"]
+        if let desc = cleaned(series.studyDescription) {
+            parts.append(desc)
+        } else if total == 1 {
+            parts = ["Study"]
+        }
+        return parts.joined(separator: "  ")
+    }
+
+    private static func studySubtitle(series: DicomSeries, seriesCount: Int) -> String {
+        var parts: [String] = []
+        if let dateTime = formattedStudyDateTime(date: series.studyDate, time: series.studyTime) {
+            parts.append(dateTime)
+        }
+        if let patient = cleaned(series.patientName) { parts.append(patient) }
+        if let id = cleaned(series.patientID) { parts.append("ID \(id)") }
+        parts.append("\(seriesCount) Series")
+        return parts.joined(separator: "  |  ")
+    }
+
+    static func cleaned(_ value: String?) -> String? {
+        let trimmed = value?
+            .replacingOccurrences(of: "^", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    static func formatStudyDate(_ value: String) -> String {
+        guard value.count == 8 else { return value }
+        let y = value.prefix(4)
+        let m = value.dropFirst(4).prefix(2)
+        let d = value.suffix(2)
+        return "\(y)-\(m)-\(d)"
+    }
+
+    static func formattedStudyDateTime(date: String?, time: String?) -> String? {
+        var parts: [String] = []
+        if let date = cleaned(date) {
+            parts.append(formatStudyDate(date))
+        }
+        if let time = cleaned(time), let formattedTime = formatStudyTime(time) {
+            parts.append(formattedTime)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    static func formatStudyTime(_ value: String) -> String? {
+        let digits = value.filter(\.isNumber)
+        guard digits.count >= 2 else { return nil }
+        let hour = String(digits.prefix(2))
+        let minuteStart = digits.index(digits.startIndex, offsetBy: min(2, digits.count))
+        let minute = digits.count >= 4 ? String(digits[minuteStart..<digits.index(minuteStart, offsetBy: 2)]) : "00"
+        return "\(hour):\(minute)"
+    }
+}
+
+struct CollapsedStudyColumn: View {
+    @Binding var selectedStudyID: String?
+    @Binding var isCollapsed: Bool
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = false } }) {
+                Image(systemName: "list.bullet.rectangle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .help("Show Study Column")
+
+            if selectedStudyID != nil {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+            }
+
+            Spacer()
+        }
+        .padding(.top, 8)
+        .background(Color(white: 0.11))
+    }
+}
+
+struct StudyListView: View {
+    @ObservedObject var model: DICOMModel
+    @Binding var selectedStudyID: String?
+    @Binding var isCollapsed: Bool
+
+    private var studies: [StudyListItem] {
+        StudyBrowserBuilder.studies(for: model.allSeries)
+    }
+
+    private var activeStudyID: String? {
+        let activeSeries = model.activePanel?.seriesIndex ?? model.currentSeriesIndex
+        guard activeSeries >= 0 else { return nil }
+        return studies.first(where: { $0.seriesIndices.contains(activeSeries) })?.id
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Studies")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = true } }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Collapse Study Column")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    StudyListRow(
+                        title: "All Studies",
+                        subtitle: "\(studies.count) Studies",
+                        isSelected: selectedStudyID == nil,
+                        isActive: activeStudyID != nil
+                    )
+                    .onTapGesture { selectedStudyID = nil }
+
+                    ForEach(studies) { study in
+                        StudyListRow(
+                            title: study.title,
+                            subtitle: study.subtitle,
+                            isSelected: selectedStudyID == study.id,
+                            isActive: activeStudyID == study.id
+                        )
+                        .onTapGesture { selectedStudyID = study.id }
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 12)
+            }
+        }
+        .background(Color(white: 0.12))
+        .onChange(of: model.allSeries.count) { _, _ in
+            if let selectedStudyID, !studies.contains(where: { $0.id == selectedStudyID }) {
+                self.selectedStudyID = nil
+            }
+        }
+    }
+}
+
+struct StudyListRow: View {
+    let title: String
+    let subtitle: String
+    let isSelected: Bool
+    let isActive: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isSelected ? .white : .primary)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.accentColor.opacity(0.24) : Color.clear)
+        .overlay(alignment: .leading) {
+            if isSelected || isActive {
+                Rectangle()
+                    .fill(isSelected ? Color.accentColor : Color.secondary.opacity(0.65))
+                    .frame(width: isSelected ? 3 : 2)
+            }
+        }
+        .cornerRadius(6)
+    }
+}
+
 struct SeriesListView: View {
     @ObservedObject var model: DICOMModel
+    @Binding var selectedStudyID: String?
+    @AppStorage("seriesThumbnailSize") private var seriesThumbnailSize: Double = 136
+    @AppStorage("seriesColumnCount") private var seriesColumnCount: Int = 1
 
     /// The series index shown by the active panel (for highlight)
     private var activeSeriesIndex: Int {
         model.activePanel?.seriesIndex ?? model.currentSeriesIndex
+    }
+
+    private var studySections: [StudySection] {
+        let sections = StudyBrowserBuilder.studies(for: model.allSeries)
+        guard let selectedStudyID else { return sections }
+        return sections.filter { $0.id == selectedStudyID }
+    }
+
+    private typealias StudySection = StudyListItem
+
+    private var seriesHeaderTitle: String {
+        guard let selectedStudyID,
+              let study = studySections.first(where: { $0.id == selectedStudyID }) else {
+            return "Series"
+        }
+        return study.title
+    }
+
+    private var gridColumns: [GridItem] {
+        let count = max(1, min(2, seriesColumnCount))
+        return Array(
+            repeating: GridItem(
+                .flexible(minimum: CGFloat(seriesThumbnailSize), maximum: max(CGFloat(seriesThumbnailSize), 280)),
+                spacing: 10,
+                alignment: .top
+            ),
+            count: count
+        )
     }
 
     /// Row background color for a given series index
@@ -283,89 +886,148 @@ struct SeriesListView: View {
     }
 
     var body: some View {
-        List(selection: $model.currentSeriesIndex) {
-            if !model.allSeries.isEmpty {
-                Section("Image Series") {
-                    ForEach(model.allSeries.indices, id: \.self) { index in
-                        SeriesRow(model: model, series: model.allSeries[index], isSelected: index == activeSeriesIndex, seriesIndex: index)
-                        .contentShape(Rectangle())
-                        .onDrag {
-                            let provider = NSItemProvider()
-                            provider.registerDataRepresentation(
-                                forTypeIdentifier: "public.utf8-plain-text",
-                                visibility: .all
-                            ) { completion in
-                                completion("\(index)".data(using: .utf8), nil)
-                                return nil
-                            }
-                            return provider
-                        }
-                        .onTapGesture {
-                            // Update legacy indices first (avoids double-load from didSet)
-                            model.currentImageIndex = 0
-                            model.currentSeriesIndex = index
-                            model.clearSelectedDerivedObject()
-                            // Load via panel path (legacy state synced via syncLegacyStateToActivePanel)
-                            if let panel = model.activePanel {
-                                model.assignSeriesToPanel(panel, seriesIndex: index)
-                            } else {
-                                // Fallback: no panels yet, use legacy path
-                                if let first = model.allSeries[index].images.first {
-                                    model.loadSingleFile(first.url)
-                                }
-                            }
-                        }
-                        .listRowBackground(rowBackground(for: index))
+        VStack(spacing: 0) {
+            HStack {
+                Text(seriesHeaderTitle)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                HStack(spacing: 6) {
+                    Button {
+                        seriesColumnCount = seriesColumnCount == 1 ? 2 : 1
+                    } label: {
+                        Image(systemName: seriesColumnCount == 1 ? "rectangle.grid.1x2" : "rectangle.grid.2x2")
+                            .font(.system(size: 12, weight: .semibold))
                     }
-                }
-            }
+                    .buttonStyle(.plain)
+                    .help(seriesColumnCount == 1 ? "Show Series in 2 Columns" : "Show Series in 1 Column")
 
-            if !model.derivedObjects.isEmpty {
-                Section("DICOM Objects") {
-                    ForEach(model.derivedObjects) { object in
-                        DerivedObjectRow(object: object, isSelected: model.selectedDerivedObjectID == object.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                model.currentSeriesIndex = -1
-                                model.currentImageIndex = -1
-                                model.inspectDerivedObject(object)
+                    Button {
+                        seriesThumbnailSize = max(88, seriesThumbnailSize - 16)
+                    } label: {
+                        Image(systemName: "minus.magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Shrink Thumbnails")
+
+                    Button {
+                        seriesThumbnailSize = min(220, seriesThumbnailSize + 16)
+                    } label: {
+                        Image(systemName: "plus.magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Enlarge Thumbnails")
+                }
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14, pinnedViews: [.sectionHeaders]) {
+                    if !model.allSeries.isEmpty {
+                        ForEach(studySections) { study in
+                            Section {
+                                LazyVGrid(
+                                    columns: gridColumns,
+                                    alignment: .center,
+                                    spacing: 10
+                                ) {
+                                    ForEach(study.seriesIndices, id: \.self) { index in
+                                        seriesCell(for: index)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                            } header: {
+                                StudyHeaderView(title: study.title, subtitle: study.subtitle)
                             }
-                            .listRowBackground(model.selectedDerivedObjectID == object.id ? Color.orange.opacity(0.16) : nil)
+                        }
+                    }
+
+                    if model.isScanning && (!model.allSeries.isEmpty || !model.derivedObjects.isEmpty) {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Scanning...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 8)
                     }
                 }
             }
-            
-            if model.isScanning && (!model.allSeries.isEmpty || !model.derivedObjects.isEmpty) {
-                 HStack {
-                     Spacer()
-                     ProgressView()
-                         .controlSize(.small)
-                     Text("Scanning...")
-                         .font(.caption)
-                         .foregroundStyle(.secondary)
-                     Spacer()
-                 }
-                 .listRowSeparator(.hidden)
-                 .padding(.vertical, 8)
+        }
+        .overlay {
+            if model.allSeries.isEmpty && model.derivedObjects.isEmpty {
+                if model.isScanning {
+                    VStack {
+                        ProgressView("Scanning Directory...")
+                            .controlSize(.regular)
+                    }
+                } else {
+                    ContentUnavailableView {
+                        Label("No Series Found", systemImage: "folder.badge.questionmark")
+                    } description: {
+                        Text("Drag a FOLDER to this window to scan for all series.")
+                    }
+                }
             }
         }
-        .listStyle(.sidebar)
-        .overlay {
-             if model.allSeries.isEmpty && model.derivedObjects.isEmpty {
-                 if model.isScanning {
-                     VStack {
-                         ProgressView("Scanning Directory...")
-                             .controlSize(.regular)
-                     }
-                 } else {
-                     ContentUnavailableView {
-                         Label("No Series Found", systemImage: "folder.badge.questionmark")
-                     } description: {
-                         Text("Drag a FOLDER to this window to scan for all series.")
-                     }
-                 }
-             }
+    }
+
+    private func seriesCell(for index: Int) -> some View {
+        SeriesRow(
+            model: model,
+            series: model.allSeries[index],
+            isSelected: index == activeSeriesIndex,
+            seriesIndex: index,
+            thumbnailSize: CGFloat(seriesThumbnailSize)
+        )
+        .contentShape(Rectangle())
+        .onDrag { makeSeriesDragProvider(index: index, suggestedName: model.allSeries[index].seriesDescription) }
+        .onTapGesture {
+            selectSeries(index)
         }
+    }
+
+    private func selectSeries(_ index: Int) {
+        model.currentImageIndex = 0
+        model.currentSeriesIndex = index
+        model.clearSelectedDerivedObject()
+        if let panel = model.activePanel {
+            model.assignSeriesToPanel(panel, seriesIndex: index)
+        } else if let first = model.allSeries[index].images.first {
+            model.loadSingleFile(first.url)
+        }
+    }
+}
+
+struct StudyHeaderView: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(white: 0.16))
     }
 }
 
@@ -403,6 +1065,7 @@ struct SeriesRow: View {
     let series: DicomSeries
     let isSelected: Bool
     let seriesIndex: Int
+    let thumbnailSize: CGFloat
 
     /// Whether any panel is displaying this series
     private var isInAnyPanel: Bool {
@@ -413,47 +1076,97 @@ struct SeriesRow: View {
         if series.images.count == 1, let nf = series.images.first?.numberOfFrames, nf > 1 {
             return "\(nf) Frames"
         }
-        return "\(series.images.count) Images"
+        return "\(series.images.count) Instances"
+    }
+
+    private var seriesTitle: String {
+        let title = series.seriesDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Series \(series.seriesNumber)" : title
+    }
+
+    private var seriesNumberLabel: String? {
+        series.seriesDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : "Series \(series.seriesNumber)"
     }
 
     var body: some View {
-        HStack {
-            Group {
-                if let thumb = model.seriesThumbnails[series.id] {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 40, height: 40)
-                        .cornerRadius(4)
-                } else {
-                    Image(systemName: "folder")
-                        .font(.system(size: 24))
+        VStack(spacing: 7) {
+            VStack(spacing: 2) {
+                Text(seriesTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let seriesNumberLabel {
+                    Text(seriesNumberLabel)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .frame(width: 40, height: 40)
-                        .onAppear {
-                            model.requestSeriesThumbnail(for: series)
-                        }
+                        .lineLimit(1)
                 }
-            }
-            VStack(alignment: .leading) {
-                Text("Series \(series.seriesNumber)")
-                    .font(.headline)
-                if !series.seriesDescription.isEmpty {
-                    Text(series.seriesDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+
                 Text(seriesCountLabel)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
             }
-            Spacer()
-            if isInAnyPanel {
-                PanelPositionIndicator(model: model, seriesIndex: seriesIndex)
+
+            ZStack(alignment: .topTrailing) {
+                thumbnailView
+
+                if isInAnyPanel {
+                    PanelPositionIndicator(model: model, seriesIndex: seriesIndex)
+                        .padding(5)
+                        .background(.black.opacity(0.55))
+                        .cornerRadius(5)
+                        .padding(5)
+                }
             }
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .background(isSelected ? Color.white.opacity(0.12) : Color.clear)
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Rectangle()
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+            }
+        }
+        .onAppear {
+            model.requestSeriesThumbnail(for: series)
+        }
     }
-}
+
+    @ViewBuilder
+    private var thumbnailView: some View {
+	        if let thumb = model.seriesThumbnails[series.id] {
+	            Image(nsImage: thumb)
+	                .resizable()
+	                .aspectRatio(contentMode: .fit)
+	                .frame(width: thumbnailSize, height: thumbnailSize)
+	                .background(Color.black)
+	                .clipped()
+	                .contentShape(Rectangle())
+	                .onDrag { seriesDragProvider(seriesIndex) }
+	        } else {
+	            ZStack {
+	                Color.black
+	                ProgressView()
+	                    .controlSize(.small)
+	                    .tint(.white)
+	            }
+	            .frame(width: thumbnailSize, height: thumbnailSize)
+	            .contentShape(Rectangle())
+	            .onDrag { seriesDragProvider(seriesIndex) }
+	        }
+	    }
+
+	    private func seriesDragProvider(_ index: Int) -> NSItemProvider {
+	        makeSeriesDragProvider(index: index, suggestedName: seriesTitle)
+	    }
+	}
 
 /// Miniature grid icon showing which panel(s) display a given series.
 /// Each cell is a tiny rounded rectangle: filled blue if the panel shows this series, border-only otherwise.
@@ -465,8 +1178,8 @@ struct PanelPositionIndicator: View {
     private let spacing: CGFloat = 2
 
     var body: some View {
-        let rows = model.layout.rows
-        let cols = model.layout.columns
+        let rows = model.isSplitComparisonMode ? 1 : model.layout.rows
+        let cols = model.isSplitComparisonMode ? 2 : model.layout.columns
 
         VStack(spacing: spacing) {
             ForEach(0..<rows, id: \.self) { row in
@@ -600,11 +1313,11 @@ struct DetailView: View {
                 return .handled
             }
             .onKeyPress(.upArrow) {
-                model.prevImage()
+                model.prevSeries()
                 return .handled
             }
             .onKeyPress(.downArrow) {
-                model.nextImage()
+                model.nextSeries()
                 return .handled
             }
         }
@@ -763,6 +1476,10 @@ struct InteractiveDICOMView: NSViewRepresentable {
             
             // Interpret Arrow Keys
             let code = event.keyCode
+            let flags = event.modifierFlags.intersection([.command, .control, .option])
+            if flags.isEmpty, model.applyWindowLevelPresetShortcut(keyCode: code) {
+                return
+            }
             // 123: Left, 124: Right, 125: Down, 126: Up
             
             switch code {
@@ -771,9 +1488,9 @@ struct InteractiveDICOMView: NSViewRepresentable {
             case 124: // Right
                  model.nextSeries()
             case 126: // Up
-                 model.prevImage()
+                 model.prevSeries()
             case 125: // Down
-                 model.nextImage()
+                 model.nextSeries()
             default:
                 super.keyDown(with: event)
             }

@@ -7,15 +7,78 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 import SwiftUI
+import AppKit
+
+final class OpenDicomViewerAppDelegate: NSObject, NSApplicationDelegate {
+    var openURLsHandler: (([URL]) -> Void)? {
+        didSet { flushPendingOpenURLs() }
+    }
+
+    private var pendingOpenURLs: [URL] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        ensureWindowExistsIfNeeded()
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        handleOpenURLs(urls)
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        handleOpenURLs(urls)
+    }
+
+    private func handleOpenURLs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        ensureWindowExistsIfNeeded()
+        if let openURLsHandler {
+            DispatchQueue.main.async {
+                openURLsHandler(urls)
+            }
+        } else {
+            pendingOpenURLs.append(contentsOf: urls)
+        }
+    }
+
+    private func flushPendingOpenURLs() {
+        guard let openURLsHandler, !pendingOpenURLs.isEmpty else { return }
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        DispatchQueue.main.async {
+            openURLsHandler(urls)
+        }
+    }
+
+    private func ensureWindowExistsIfNeeded() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let hasVisibleWindow = NSApp.windows.contains { $0.isVisible }
+            guard !hasVisibleWindow else { return }
+            NSApp.sendAction(#selector(NSWindow.newWindowForTab(_:)), to: nil, from: nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+}
 
 @main
 struct OpenDicomViewerApp: App {
+    @NSApplicationDelegateAdaptor(OpenDicomViewerAppDelegate.self) private var appDelegate
     @StateObject private var model = DICOMModel()
     @StateObject private var updateChecker = UpdateChecker()
 
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
+                .onAppear {
+                    appDelegate.openURLsHandler = { [weak model] urls in
+                        guard let url = urls.first else { return }
+                        model?.load(url: url)
+                    }
+                }
+                .onOpenURL { url in
+                    model.load(url: url)
+                }
                 .task {
                     // Auto-open directory if passed via --benchmark /path
                     if let benchIdx = CommandLine.arguments.firstIndex(of: "--benchmark"),
@@ -50,6 +113,11 @@ struct OpenDicomViewerApp: App {
                     model.openFolder()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Button("Anonymize Folder...") {
+                    model.anonymizeFolder()
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
             }
 
             CommandGroup(after: .toolbar) {
@@ -60,12 +128,6 @@ struct OpenDicomViewerApp: App {
                     }
                 }
 
-                Button("Invert (I)") {
-                    model.invertForPanel(model.activePanel)
-                }
-
-                Divider()
-
                 // ─ Transform ─
                 Button("Fit to Window (F)") {
                     model.fitToWindowForPanel(model.activePanel)
@@ -73,24 +135,6 @@ struct OpenDicomViewerApp: App {
 
                 Button("Reset View (R)") {
                     model.resetViewForPanel(model.activePanel)
-                }
-
-                Divider()
-
-                Button("Rotate Clockwise 90° (])") {
-                    model.rotateClockwiseForPanel(model.activePanel)
-                }
-
-                Button("Rotate Counter-Clockwise 90° ([)") {
-                    model.rotateCounterClockwiseForPanel(model.activePanel)
-                }
-
-                Button("Flip Horizontal (H)") {
-                    model.flipHorizontalForPanel(model.activePanel)
-                }
-
-                Button("Flip Vertical") {
-                    model.flipVerticalForPanel(model.activePanel)
                 }
 
                 Divider()
@@ -107,18 +151,18 @@ struct OpenDicomViewerApp: App {
                 }
                 .keyboardShortcut("1", modifiers: .command)
 
-                Button("Side by Side") {
-                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoHorizontal) }
+                Button("2×2 Tiles") {
+                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoByTwo) }
                 }
                 .keyboardShortcut("2", modifiers: .command)
 
-                Button("Stacked") {
-                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoVertical) }
+                Button("3×3 Tiles") {
+                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.threeByThree) }
                 }
                 .keyboardShortcut("3", modifiers: .command)
 
-                Button("Four Panels") {
-                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.quad) }
+                Button("4×4 Tiles") {
+                    withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.fourByFour) }
                 }
                 .keyboardShortcut("4", modifiers: .command)
 
@@ -157,7 +201,7 @@ struct OpenDicomViewerApp: App {
             }
 
             CommandGroup(replacing: .help) {
-                Button("OpenDicomViewer Help") {
+                Button("Smart DICOM Viewer Help") {
                     model.showHelp = true
                 }
             }
@@ -180,7 +224,7 @@ struct OpenDicomViewerApp: App {
         case .updateAvailable(let version, let notes, _):
             return "Version \(version) is available (current: \(updateChecker.currentVersion)).\n\n\(String(notes.prefix(300)))"
         case .upToDate:
-            return "OpenDicomViewer \(updateChecker.currentVersion) is the latest version."
+            return "Smart DICOM Viewer \(updateChecker.currentVersion) is the latest version."
         default:
             return ""
         }

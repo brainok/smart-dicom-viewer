@@ -22,10 +22,12 @@
 
 import SwiftUI
 import QuartzCore
+import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Multi-Panel Container
 
-/// Arranges panels in a grid based on the current ViewerLayout.
+/// Shows the active panel, or an instance grid for the active panel's series.
 struct MultiPanelContainer: View {
     @ObservedObject var model: DICOMModel
     @FocusState.Binding var isFocused: Bool
@@ -51,45 +53,547 @@ struct MultiPanelContainer: View {
             .onTapGesture(count: 1) {
                 isFocused = true
             }
+        } else if model.isSplitComparisonMode {
+            SplitComparisonView(model: model, isFocused: $isFocused)
+        } else if layout != .single, let activePanel = model.activePanel {
+            InstanceTileGridView(
+                model: model,
+                panel: activePanel,
+                layout: layout,
+                isFocused: $isFocused
+            )
         } else {
-            // Grid mode — equal sizing via flexible frames
-            let rows = layout.rows
-            let cols = layout.columns
+            let panel = model.activePanel ?? model.panels.first
+            if let panel {
+                PanelView(
+                    model: model,
+                    panel: panel,
+                    isActive: true,
+                    isFocused: $isFocused
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .id(panel.id)
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        model.toggleFullscreen(for: panel)
+                    }
+                }
+                .onTapGesture(count: 1) {
+                    model.activePanelID = panel.id
+                    isFocused = true
+                }
+            } else {
+                EmptyPanelView()
+            }
+        }
+    }
+}
 
-            VStack(spacing: 1) {
-                ForEach(0..<rows, id: \.self) { row in
-                    HStack(spacing: 1) {
-                        ForEach(0..<cols, id: \.self) { col in
-                            let index = row * cols + col
-                            if index < model.panels.count {
-                                let panel = model.panels[index]
-                                PanelView(
-                                    model: model,
-                                    panel: panel,
-                                    isActive: panel.id == model.activePanelID,
-                                    isFocused: $isFocused
-                                )
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .id(panel.id)
-                                .onTapGesture(count: 2) {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        model.toggleFullscreen(for: panel)
-                                    }
-                                }
-                                .onTapGesture(count: 1) {
-                                    model.activePanelID = panel.id
-                                    isFocused = true
-                                }
-                            } else {
-                                EmptyPanelView()
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+struct SplitComparisonView: View {
+    @ObservedObject var model: DICOMModel
+    @FocusState.Binding var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(0..<2, id: \.self) { index in
+                if index < model.panels.count {
+                    let panel = model.panels[index]
+                    PanelView(
+                        model: model,
+                        panel: panel,
+                        isActive: panel.id == model.activePanelID,
+                        isFocused: $isFocused
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .id(panel.id)
+                    .onTapGesture {
+                        model.activePanelID = panel.id
+                        isFocused = true
+                    }
+                } else {
+                    EmptyPanelView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .background(Color(white: 0.12))
+    }
+}
+
+struct InstanceTileGridView: View {
+    @ObservedObject var model: DICOMModel
+    @ObservedObject var panel: PanelState
+    let layout: ViewerLayout
+    @FocusState.Binding var isFocused: Bool
+    @State private var tileStartIndex: Int = 0
+
+    private var tileIndices: [Int] {
+        let total = model.totalSliceCount(for: panel)
+        guard total > 0 else { return [] }
+        let count = min(layout.panelCount, total)
+        let start = max(0, min(tileStartIndex, max(0, total - count)))
+        return Array(start..<(start + count))
+    }
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ForEach(0..<layout.rows, id: \.self) { row in
+                HStack(spacing: 1) {
+                    ForEach(0..<layout.columns, id: \.self) { col in
+                        let slot = row * layout.columns + col
+                        if slot < tileIndices.count {
+                            InstanceTileView(
+                                model: model,
+                                panel: panel,
+                                index: tileIndices[slot],
+                                isSelected: tileIndices[slot] == model.currentSliceIndex(for: panel)
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .onTapGesture {
+                                model.navigatePanelToSlice(panel, index: tileIndices[slot])
+                                isFocused = true
                             }
+                        } else {
+                            Color.black
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .background(Color(white: 0.15))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(white: 0.15))
+        .onAppear {
+            syncTileWindowToCurrent()
+            model.prepareTileImages(for: panel, indices: tileIndices)
+        }
+        .onChange(of: model.currentSliceIndex(for: panel)) { _, _ in
+            syncTileWindowToCurrent()
+        }
+        .onChange(of: layout) { _, _ in
+            syncTileWindowToCurrent()
+        }
+        .onChange(of: model.totalSliceCount(for: panel)) { _, _ in
+            syncTileWindowToCurrent()
+        }
+        .onChange(of: tileIndices) { _, newIndices in
+            model.prepareTileImages(for: panel, indices: newIndices)
+        }
+        .overlay {
+            TileGridInteractionView(
+                onScroll: { direction in
+                    pageTiles(direction: direction)
+                },
+                onStepSlice: { offset in
+                    stepSlice(offset: offset)
+                },
+                onPresetKey: { keyCode in
+                    model.applyWindowLevelPresetShortcut(keyCode: keyCode, to: panel)
+                },
+                onZoom: { delta in
+                    zoomTiles(delta: delta)
+                },
+                onPan: { deltaX, deltaY in
+                    panTiles(deltaX: deltaX, deltaY: deltaY)
+                },
+                onWindowLevelDrag: { deltaX, deltaY in
+                    adjustWindowLevel(deltaX: deltaX, deltaY: deltaY)
+                },
+                onSelectPoint: { point in
+                    selectTile(at: point)
+                },
+                onDropSeriesIndex: { index in
+                    assignDroppedSeries(index)
+                },
+                onDropURL: { url in
+                    model.load(url: url)
+                },
+                shouldZoomScroll: { event in
+                    event.modifierFlags.contains(.command)
+                    || event.modifierFlags.contains(.option)
+                    || event.modifierFlags.contains(.control)
+                },
+                shouldZoomLeftDrag: {
+                    model.activeTool == .zoom
+                },
+                shouldAdjustLeftDrag: {
+                    model.activeTool == .windowLevel
+                },
+                shouldPanLeftDrag: { event in
+                    event.modifierFlags.contains(.command)
+                    || event.modifierFlags.contains(.option)
+                    || event.modifierFlags.contains(.control)
+                    || model.activeTool == .pan
+                }
+            )
+        }
+        .onDrop(of: DropItemResolver.acceptedTypes, isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+        }
+        .overlay(alignment: .bottom) {
+            PanelAdjustmentToolbar(model: model, panel: panel)
+                .padding(.bottom, 8)
+        }
+    }
+
+    private func syncTileWindowToCurrent() {
+        let total = model.totalSliceCount(for: panel)
+        guard total > 0 else {
+            tileStartIndex = 0
+            return
+        }
+
+        let count = min(layout.panelCount, total)
+        let current = max(0, min(total - 1, model.currentSliceIndex(for: panel)))
+        tileStartIndex = slidingTileStart(
+            currentStart: tileStartIndex,
+            currentIndex: current,
+            totalCount: total,
+            visibleCount: count
+        )
+    }
+
+    private func stepSlice(offset: Int) {
+        guard offset != 0 else { return }
+        model.navigatePanelByOffset(panel, offset: offset)
+        isFocused = true
+    }
+
+    private func pageTiles(direction: Int) {
+        let total = model.totalSliceCount(for: panel)
+        guard total > 0 else { return }
+        let step = min(layout.panelCount, total)
+        let current = max(0, model.currentSliceIndex(for: panel))
+        let newIndex = max(0, min(total - 1, current + (direction * step)))
+        guard newIndex != current else { return }
+        model.navigatePanelToSlice(panel, index: newIndex)
+        isFocused = true
+    }
+
+    private func zoomTiles(delta: CGFloat) {
+        guard delta != 0 else { return }
+        let zoomSpeed: CGFloat = 0.05
+        let newScale = max(0.1, min(10.0, panel.scale + delta * zoomSpeed))
+        guard newScale != panel.scale else { return }
+        panel.scale = newScale
+        model.saveViewStateForPanel(panel, scale: newScale, translation: panel.translation)
+        model.syncZoomFromPanel(panel)
+        isFocused = true
+    }
+
+    private func panTiles(deltaX: CGFloat, deltaY: CGFloat) {
+        panel.translation.x += deltaX
+        panel.translation.y -= deltaY
+        model.saveViewStateForPanel(panel, scale: panel.scale, translation: panel.translation)
+        model.syncZoomFromPanel(panel)
+        isFocused = true
+    }
+
+    private func adjustWindowLevel(deltaX: Double, deltaY: Double) {
+        let dynamicFactor = max(0.1, panel.windowWidth / 500.0)
+        model.adjustWindowLevelForPanel(
+            panel,
+            deltaWidth: deltaX * dynamicFactor,
+            deltaCenter: deltaY * dynamicFactor
+        )
+        isFocused = true
+    }
+
+    private func selectTile(at point: CGPoint) {
+        guard !tileIndices.isEmpty else { return }
+        let col = min(layout.columns - 1, max(0, Int(point.x * CGFloat(layout.columns))))
+        let row = min(layout.rows - 1, max(0, Int(point.y * CGFloat(layout.rows))))
+        let slot = row * layout.columns + col
+        guard slot >= 0, slot < tileIndices.count else { return }
+        model.navigatePanelToSlice(panel, index: tileIndices[slot])
+        isFocused = true
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        DropItemResolver.handle(
+            providers: providers,
+            onSeriesIndex: { index in assignDroppedSeries(index) },
+            onURL: { url in model.load(url: url) }
+        )
+    }
+
+    private func assignDroppedSeries(_ index: Int) {
+        guard index >= 0, index < model.allSeries.count else { return }
+        model.clearSelectedDerivedObject()
+        model.assignSeriesToPanel(panel, seriesIndex: index)
+        isFocused = true
+    }
+}
+
+func slidingTileStart(currentStart: Int, currentIndex: Int, totalCount: Int, visibleCount: Int) -> Int {
+    guard totalCount > 0, visibleCount > 0 else { return 0 }
+    let count = min(visibleCount, totalCount)
+    let maxStart = max(0, totalCount - count)
+    let clampedStart = max(0, min(currentStart, maxStart))
+    let clampedCurrent = max(0, min(currentIndex, totalCount - 1))
+    let currentEnd = clampedStart + count - 1
+
+    if clampedCurrent < clampedStart {
+        return max(0, min(clampedCurrent, maxStart))
+    }
+    if clampedCurrent > currentEnd {
+        return max(0, min(clampedCurrent - count + 1, maxStart))
+    }
+    return clampedStart
+}
+
+struct TileGridInteractionView: NSViewRepresentable {
+    let onScroll: (Int) -> Void
+    let onStepSlice: (Int) -> Void
+    let onPresetKey: (UInt16) -> Bool
+    let onZoom: (CGFloat) -> Void
+    let onPan: (CGFloat, CGFloat) -> Void
+    let onWindowLevelDrag: (Double, Double) -> Void
+    let onSelectPoint: (CGPoint) -> Void
+    let onDropSeriesIndex: (Int) -> Void
+    let onDropURL: (URL) -> Void
+    let shouldZoomScroll: (NSEvent) -> Bool
+    let shouldZoomLeftDrag: () -> Bool
+    let shouldAdjustLeftDrag: () -> Bool
+    let shouldPanLeftDrag: (NSEvent) -> Bool
+
+    func makeNSView(context: Context) -> InteractionCatcherView {
+        let view = InteractionCatcherView()
+        view.onScroll = onScroll
+        view.onStepSlice = onStepSlice
+        view.onPresetKey = onPresetKey
+        view.onZoom = onZoom
+        view.onPan = onPan
+        view.onWindowLevelDrag = onWindowLevelDrag
+        view.onSelectPoint = onSelectPoint
+        view.onDropSeriesIndex = onDropSeriesIndex
+        view.onDropURL = onDropURL
+        view.shouldZoomScroll = shouldZoomScroll
+        view.shouldZoomLeftDrag = shouldZoomLeftDrag
+        view.shouldAdjustLeftDrag = shouldAdjustLeftDrag
+        view.shouldPanLeftDrag = shouldPanLeftDrag
+        return view
+    }
+
+    func updateNSView(_ nsView: InteractionCatcherView, context: Context) {
+        nsView.onScroll = onScroll
+        nsView.onStepSlice = onStepSlice
+        nsView.onPresetKey = onPresetKey
+        nsView.onZoom = onZoom
+        nsView.onPan = onPan
+        nsView.onWindowLevelDrag = onWindowLevelDrag
+        nsView.onSelectPoint = onSelectPoint
+        nsView.onDropSeriesIndex = onDropSeriesIndex
+        nsView.onDropURL = onDropURL
+        nsView.shouldZoomScroll = shouldZoomScroll
+        nsView.shouldZoomLeftDrag = shouldZoomLeftDrag
+        nsView.shouldAdjustLeftDrag = shouldAdjustLeftDrag
+        nsView.shouldPanLeftDrag = shouldPanLeftDrag
+    }
+
+    final class InteractionCatcherView: NSView {
+        var onScroll: ((Int) -> Void)?
+        var onStepSlice: ((Int) -> Void)?
+        var onPresetKey: ((UInt16) -> Bool)?
+        var onZoom: ((CGFloat) -> Void)?
+        var onPan: ((CGFloat, CGFloat) -> Void)?
+        var onWindowLevelDrag: ((Double, Double) -> Void)?
+        var onSelectPoint: ((CGPoint) -> Void)?
+        var onDropSeriesIndex: ((Int) -> Void)?
+        var onDropURL: ((URL) -> Void)?
+        var shouldZoomScroll: ((NSEvent) -> Bool)?
+        var shouldZoomLeftDrag: (() -> Bool)?
+        var shouldAdjustLeftDrag: (() -> Bool)?
+        var shouldPanLeftDrag: ((NSEvent) -> Bool)?
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            registerForDraggedTypes([
+                DragPasteboardTypes.seriesIndexPasteboardType,
+                .string,
+                NSPasteboard.PasteboardType("public.utf8-plain-text"),
+                NSPasteboard.PasteboardType("public.plain-text")
+            ] + DragPasteboardTypes.fileURLPasteboardTypes)
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            self
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            let point = convert(event.locationInWindow, from: nil)
+            let normalized = CGPoint(
+                x: bounds.width > 0 ? point.x / bounds.width : 0,
+                y: bounds.height > 0 ? 1 - (point.y / bounds.height) : 0
+            )
+            onSelectPoint?(normalized)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            if shouldPanLeftDrag?(event) == true {
+                onPan?(event.deltaX, event.deltaY)
+            } else if shouldZoomLeftDrag?() == true {
+                onZoom?(event.deltaY)
+            } else if shouldAdjustLeftDrag?() == true {
+                onWindowLevelDrag?(Double(event.deltaX), Double(event.deltaY))
+            }
+        }
+
+        override func rightMouseDragged(with event: NSEvent) {
+            onWindowLevelDrag?(Double(event.deltaX), Double(event.deltaY))
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            let delta = event.scrollingDeltaY
+            guard abs(delta) >= 0.1 else { return }
+            if shouldZoomScroll?(event) == true {
+                onZoom?(delta)
+            } else {
+                onScroll?(delta < 0 ? 1 : -1)
+            }
+        }
+
+        override func keyDown(with event: NSEvent) {
+            let flags = event.modifierFlags.intersection([.command, .control, .option])
+            if flags.isEmpty, onPresetKey?(event.keyCode) == true {
+                return
+            }
+            switch event.keyCode {
+            case 123:
+                onStepSlice?(-1)
+            case 124:
+                onStepSlice?(1)
+            default:
+                super.keyDown(with: event)
+            }
+        }
+
+        override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+            canAccept(sender) ? .link : []
+        }
+
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            canAccept(sender) ? .link : []
+        }
+
+        override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+            let pb = sender.draggingPasteboard
+            if let index = draggedSeriesIndex(from: pb) {
+                onDropSeriesIndex?(index)
+                return true
+            }
+            if let url = pasteboardFileURL(from: pb) {
+                onDropURL?(url)
+                return true
+            }
+            return false
+        }
+
+        private func canAccept(_ sender: NSDraggingInfo) -> Bool {
+            let pb = sender.draggingPasteboard
+            if draggedSeriesIndex(from: pb) != nil { return true }
+            if pasteboardFileURL(from: pb) != nil {
+                return true
+            }
+            return false
+        }
+
+        private func draggedSeriesIndex(from pb: NSPasteboard) -> Int? {
+            if let data = pb.data(forType: DragPasteboardTypes.seriesIndexPasteboardType),
+               let text = String(data: data, encoding: .utf8),
+               let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            for type in [
+                DragPasteboardTypes.seriesIndexPasteboardType,
+                .string,
+                NSPasteboard.PasteboardType("public.utf8-plain-text"),
+                NSPasteboard.PasteboardType("public.plain-text")
+            ] {
+                if let text = pb.string(forType: type),
+                   let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    return index
+                }
+            }
+            if let items = pb.readObjects(forClasses: [NSString.self]) as? [NSString],
+               let first = items.first,
+               let index = Int((first as String).trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            return nil
+        }
+
+        private func pasteboardFileURL(from pb: NSPasteboard) -> URL? {
+            DragPasteboardTypes.fileURL(from: pb)
+        }
+    }
+}
+
+struct InstanceTileView: View {
+    @ObservedObject var model: DICOMModel
+    @ObservedObject var panel: PanelState
+    let index: Int
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            if let image = model.getCachedImageForPanel(panel, at: index) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .scaleEffect(panel.scale, anchor: .center)
+                    .offset(x: panel.translation.x, y: -panel.translation.y)
+                    .clipped()
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            }
+
+            VStack {
+                HStack {
+                    Text(tileLabel)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.55))
+                        .cornerRadius(4)
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(6)
+        }
+        .overlay(
+            Rectangle()
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
+        .clipped()
+    }
+
+    private var tileLabel: String {
+        if panel.isMultiFrame && panel.numberOfFrames > 1 {
+            return "Frame \(index + 1)"
+        }
+        guard panel.seriesIndex >= 0,
+              panel.seriesIndex < model.allSeries.count,
+              index < model.allSeries[panel.seriesIndex].images.count else {
+            return "\(index + 1)"
+        }
+        let instance = model.allSeries[panel.seriesIndex].images[index].instanceNumber
+        return "Image \(instance)"
     }
 }
 
@@ -157,6 +661,50 @@ struct PanelView: View {
                     Spacer()
                 }
                 .zIndex(5)
+            }
+
+            if panel.image != nil, let patientLabel = patientLabel {
+                VStack {
+                    HStack {
+                        Text(patientLabel)
+                            .font(.system(size: 24, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .multilineTextAlignment(.leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.55))
+                            .cornerRadius(8)
+                            .padding(.leading, 8)
+                            .padding(.top, 46)
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+                .zIndex(6)
+            }
+
+            if panel.image != nil && panel.windowWidth > 0 {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text(String(format: "WL %.0f", panel.windowCenter))
+                            Text(String(format: "WW %.0f", panel.windowWidth))
+                        }
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(.black.opacity(0.48))
+                        .cornerRadius(7)
+                        .padding(.trailing, 52)
+                        .padding(.bottom, 76)
+                    }
+                }
+                .allowsHitTesting(false)
+                .zIndex(16)
             }
 
             // Shift-overlay for group selection (multi-panel only)
@@ -321,6 +869,47 @@ struct PanelView: View {
             }
         )
         .clipped()
+        .onDrop(of: DropItemResolver.acceptedTypes, isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+        }
+    }
+
+    private var patientLabel: String? {
+        guard panel.seriesIndex >= 0,
+              panel.seriesIndex < model.allSeries.count else { return nil }
+        let series = model.allSeries[panel.seriesIndex]
+        var lines: [String] = []
+        if let name = cleanPatientValue(series.patientName) {
+            lines.append(name)
+        }
+        if let id = cleanPatientValue(series.patientID) {
+            lines.append("ID \(id)")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    private func cleanPatientValue(_ value: String?) -> String? {
+        let cleaned = value?
+            .replacingOccurrences(of: "^", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let cleaned, !cleaned.isEmpty else { return nil }
+        return cleaned
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        DropItemResolver.handle(
+            providers: providers,
+            onSeriesIndex: { index in assignDroppedSeries(index) },
+            onURL: { url in model.load(url: url) }
+        )
+    }
+
+    private func assignDroppedSeries(_ index: Int) {
+        guard index >= 0, index < model.allSeries.count else { return }
+        model.clearSelectedDerivedObject()
+        model.assignSeriesToPanel(panel, seriesIndex: index)
+        model.activePanelID = panel.id
+        isFocused = true
     }
 }
 
@@ -420,41 +1009,73 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             imageView.layer?.anchorPoint = CGPoint(x: 0.5, y: 0.5)
 
             // Register for drag & drop: series from sidebar (.string) + files/folders from Finder (.fileURL)
-            registerForDraggedTypes([.string, .fileURL])
+            registerForDraggedTypes([
+                DragPasteboardTypes.seriesIndexPasteboardType,
+                .string,
+                NSPasteboard.PasteboardType("public.utf8-plain-text"),
+                NSPasteboard.PasteboardType("public.plain-text")
+            ] + DragPasteboardTypes.fileURLPasteboardTypes)
         }
 
         // MARK: - Drag & Drop (NSDraggingDestination)
 
+        private func draggedSeriesIndex(from pb: NSPasteboard) -> Int? {
+            if let data = pb.data(forType: DragPasteboardTypes.seriesIndexPasteboardType),
+               let text = String(data: data, encoding: .utf8),
+               let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            if let text = pb.string(forType: DragPasteboardTypes.seriesIndexPasteboardType),
+               let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            if let text = pb.string(forType: .string),
+               let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            for type in [
+                NSPasteboard.PasteboardType("public.utf8-plain-text"),
+                NSPasteboard.PasteboardType("public.plain-text")
+            ] {
+                if let text = pb.string(forType: type),
+                   let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    return index
+                }
+            }
+            if let items = pb.readObjects(forClasses: [NSString.self]) as? [NSString],
+               let first = items.first,
+               let index = Int((first as String).trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return index
+            }
+            return nil
+        }
+
         private func hasDraggableContent(_ sender: NSDraggingInfo) -> Bool {
             let pb = sender.draggingPasteboard
             // Check for series index string (from sidebar)
-            if let strs = pb.readObjects(forClasses: [NSString.self]) as? [String],
-               let first = strs.first, Int(first) != nil {
+            if draggedSeriesIndex(from: pb) != nil {
                 return true
             }
             // Check for file URLs (from Finder)
-            if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
-               !urls.isEmpty {
+            if DragPasteboardTypes.fileURL(from: pb) != nil {
                 return true
             }
             return false
         }
 
         override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-            hasDraggableContent(sender) ? .copy : []
+            hasDraggableContent(sender) ? .link : []
         }
 
         override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-            hasDraggableContent(sender) ? .copy : []
+            hasDraggableContent(sender) ? .link : []
         }
 
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
             let pb = sender.draggingPasteboard
 
             // 1. Series index from sidebar
-            if let strs = pb.readObjects(forClasses: [NSString.self]) as? [String],
-               let first = strs.first,
-               let seriesIndex = Int(first),
+            if let seriesIndex = draggedSeriesIndex(from: pb),
                let model = model, let panel = panel {
                 DispatchQueue.main.async {
                     model.assignSeriesToPanel(panel, seriesIndex: seriesIndex)
@@ -463,9 +1084,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             }
 
             // 2. File/folder URL from Finder
-            if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-               let url = urls.first,
-               let model = model {
+            if let url = pasteboardFileURL(from: pb), let model = model {
                 DispatchQueue.main.async {
                     model.load(url: url)
                 }
@@ -473,6 +1092,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             }
 
             return false
+        }
+
+        private func pasteboardFileURL(from pb: NSPasteboard) -> URL? {
+            DragPasteboardTypes.fileURL(from: pb)
         }
 
         func setImage(_ img: NSImage) {
@@ -576,6 +1199,9 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             // Only handle unmodified keys
             let flags = event.modifierFlags.intersection([.command, .control, .option])
             guard flags.isEmpty else { return super.performKeyEquivalent(with: event) }
+            if model.applyWindowLevelPresetShortcut(keyCode: event.keyCode, to: panel) {
+                return true
+            }
             guard let key = event.charactersIgnoringModifiers?.lowercased() else { return super.performKeyEquivalent(with: event) }
 
             switch key {
@@ -583,13 +1209,13 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.single) } }
                 return true
             case "2":
-                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoHorizontal) } }
+                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoByTwo) } }
                 return true
             case "3":
-                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoVertical) } }
+                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.threeByThree) } }
                 return true
             case "4":
-                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.quad) } }
+                DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.fourByFour) } }
                 return true
             case "r":
                 model.resetViewForPanel(model.activePanel)
@@ -602,9 +1228,6 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 return true
             case "t":
                 model.showTags.toggle()
-                return true
-            case "i":
-                model.invertForPanel(model.activePanel)
                 return true
             case "f":
                 model.fitToWindowForPanel(model.activePanel)
@@ -629,12 +1252,6 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
             case "e":
                 model.activeTool = .eraser
                 return true
-            case "]", ".":
-                model.rotateClockwiseForPanel(model.activePanel)
-                return true
-            case "[", ",":
-                model.rotateCounterClockwiseForPanel(model.activePanel)
-                return true
             case "w":
                 model.activeTool = .windowLevel
                 return true
@@ -646,9 +1263,6 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 return true
             case "z":
                 model.activeTool = .zoom
-                return true
-            case "h":
-                model.flipHorizontalForPanel(model.activePanel)
                 return true
             case " ":
                 if panel.isMultiFrame && panel.numberOfFrames > 1 {
@@ -773,8 +1387,8 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             guard let model = model, let panel = panel else { return }
 
-            // Modifier overrides: Option/Control + left-click starts pan
-            let mods = event.modifierFlags.intersection([.option, .control])
+            // Modifier overrides: Command/Option/Control + left-click starts pan
+            let mods = event.modifierFlags.intersection([.command, .option, .control])
             if !mods.isEmpty {
                 lastDragLocation = event.locationInWindow
                 return
@@ -916,11 +1530,15 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             // Arrow keys by keyCode (not affected by IME)
             let code = event.keyCode
+            let flags = event.modifierFlags.intersection([.command, .control, .option])
+            if flags.isEmpty, model.applyWindowLevelPresetShortcut(keyCode: code, to: panel) {
+                return
+            }
             switch code {
-            case 123: model.navigatePanel(panel, direction: .prevSeries); return
-            case 124: model.navigatePanel(panel, direction: .nextSeries); return
-            case 126: model.navigatePanelWithGroup(panel, direction: .prevImage); return
-            case 125: model.navigatePanelWithGroup(panel, direction: .nextImage); return
+            case 123: model.navigatePanelByOffset(panel, offset: -1); return
+            case 124: model.navigatePanelByOffset(panel, offset: 1); return
+            case 126: model.navigatePanel(panel, direction: .prevSeries); return
+            case 125: model.navigatePanel(panel, direction: .nextSeries); return
             case 49: // Space
                 if panel.isMultiFrame && panel.numberOfFrames > 1 {
                     model.toggleCinePlayback(panel); return
@@ -934,26 +1552,24 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
             // Handle letter/symbol shortcuts using charactersIgnoringModifiers
             // This returns the physical key regardless of IME (Korean, Japanese, Chinese)
-            let flags = event.modifierFlags.intersection([.command, .control, .option])
             if flags.isEmpty, let key = event.charactersIgnoringModifiers?.lowercased() {
                 switch key {
                 case "1":
                     DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.single) } }
                     return
                 case "2":
-                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoHorizontal) } }
+                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoByTwo) } }
                     return
                 case "3":
-                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoVertical) } }
+                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.threeByThree) } }
                     return
                 case "4":
-                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.quad) } }
+                    DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.fourByFour) } }
                     return
                 case "r": model.resetViewForPanel(model.activePanel); return
                 case "l": model.synchronizedScrolling.toggle(); return
                 case "x": model.showCrossReference.toggle(); return
                 case "t": model.showTags.toggle(); return
-                case "i": model.invertForPanel(model.activePanel); return
                 case "f": model.fitToWindowForPanel(model.activePanel); return
                 case "a":
                     if let p = model.activePanel { model.autoWindowLevelForPanel(p) }
@@ -963,13 +1579,10 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
                 case "d": model.activeTool = .ruler; return
                 case "n": model.activeTool = .angle; return
                 case "e": model.activeTool = .eraser; return
-                case "]", ".": model.rotateClockwiseForPanel(model.activePanel); return
-                case "[", ",": model.rotateCounterClockwiseForPanel(model.activePanel); return
                 case "w": model.activeTool = .windowLevel; return
                 case "v": model.activeTool = .select; return
                 case "p": model.activeTool = .pan; return
                 case "z": model.activeTool = .zoom; return
-                case "h": model.flipHorizontalForPanel(model.activePanel); return
                 default: break
                 }
             }
@@ -979,8 +1592,8 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         }
 
         override func scrollWheel(with event: NSEvent) {
-            // Option/Control+Scroll or Zoom tool active = Zoom
-            if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) || model?.activeTool == .zoom {
+            // Command/Option/Control+Scroll or Zoom tool active = Zoom
+            if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option) || event.modifierFlags.contains(.control) || model?.activeTool == .zoom {
                 guard let panel = panel else { return }
                 let dy = event.deltaY
                 if dy == 0 { return }
@@ -1075,8 +1688,8 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
         override func mouseDragged(with event: NSEvent) {
             guard let panel = panel, let model = model else { return }
 
-            // Modifier overrides: Option/Control + left-drag = pan
-            let mods = event.modifierFlags.intersection([.option, .control])
+            // Modifier overrides: Command/Option/Control + left-drag = pan
+            let mods = event.modifierFlags.intersection([.command, .option, .control])
             if !mods.isEmpty {
                 guard let layer = imageView.layer else { return }
                 let dx = event.deltaX
@@ -1334,7 +1947,7 @@ struct PanelInteractiveDICOMView: NSViewRepresentable {
 
 // MARK: - ROI Overlay
 
-/// Draws the ROI selection rectangle during drag.
+/// Draws the ROI selection ellipse during drag.
 struct ROIOverlay: View {
     @ObservedObject var panel: PanelState
     let roiRect: CGRect
@@ -1342,9 +1955,9 @@ struct ROIOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let screenRect = pixelRectToScreen(roiRect, viewSize: geo.size)
-            Rectangle()
+            Ellipse()
                 .stroke(Color.yellow, lineWidth: 2)
-                .background(Color.yellow.opacity(0.1))
+                .background(Ellipse().fill(Color.yellow.opacity(0.1)))
                 .frame(width: screenRect.width, height: screenRect.height)
                 .position(x: screenRect.midX, y: screenRect.midY)
         }
@@ -1454,6 +2067,36 @@ struct PanelAdjustmentToolbar: View {
             }
             .frame(height: 40)
             .help("Auto W/L (A)")
+
+            Menu {
+                ForEach(model.windowLevelPresets) { preset in
+                    Button {
+                        model.applyWindowLevelPreset(preset, to: panel)
+                    } label: {
+                        Text("\(preset.name)  \(preset.detail)")
+                    }
+                }
+                Divider()
+                Button {
+                    model.showPresetEditor = true
+                } label: {
+                    Label("Edit Presets...", systemImage: "slider.horizontal.3")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "slider.horizontal.3")
+                    Text("Preset")
+                }
+            }
+            .frame(height: 40)
+            .help("Window/Level Presets")
+
+            Button(action: { model.resetViewForPanel(panel) }) {
+                Image(systemName: "arrow.counterclockwise")
+                    .frame(width: 28)
+            }
+            .frame(height: 40)
+            .help("Reset View")
 
         }
         .buttonStyle(.bordered)
@@ -2118,7 +2761,7 @@ struct AnnotationOverlay: View {
                 height: abs(bottomRight.y - topLeft.y)
             )
             ZStack {
-                Rectangle()
+                Ellipse()
                     .stroke(Color.orange, lineWidth: 1.5)
                     .frame(width: screenRect.width, height: screenRect.height)
                     .position(x: screenRect.midX, y: screenRect.midY)

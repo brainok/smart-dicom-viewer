@@ -22,6 +22,9 @@ private class KeyInterceptorView: NSView {
         // Only handle unmodified keys
         let flags = event.modifierFlags.intersection([.command, .control, .option])
         guard flags.isEmpty else { return super.performKeyEquivalent(with: event) }
+        if model.applyWindowLevelPresetShortcut(keyCode: event.keyCode) {
+            return true
+        }
         guard let key = event.charactersIgnoringModifiers?.lowercased() else { return super.performKeyEquivalent(with: event) }
 
         switch key {
@@ -29,19 +32,18 @@ private class KeyInterceptorView: NSView {
             DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.single) } }
             return true
         case "2":
-            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoHorizontal) } }
+            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoByTwo) } }
             return true
         case "3":
-            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.twoVertical) } }
+            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.threeByThree) } }
             return true
         case "4":
-            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.quad) } }
+            DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.25)) { model.setLayout(.fourByFour) } }
             return true
         case "r": model.resetViewForPanel(model.activePanel); return true
         case "l": model.synchronizedScrolling.toggle(); return true
         case "x": model.showCrossReference.toggle(); return true
         case "t": model.showTags.toggle(); return true
-        case "i": model.invertForPanel(model.activePanel); return true
         case "f": model.fitToWindowForPanel(model.activePanel); return true
         case "a":
             if let panel = model.activePanel { model.autoWindowLevelForPanel(panel) }
@@ -51,13 +53,10 @@ private class KeyInterceptorView: NSView {
         case "d": model.activeTool = .ruler; return true
         case "n": model.activeTool = .angle; return true
         case "e": model.activeTool = .eraser; return true
-        case "]", ".": model.rotateClockwiseForPanel(model.activePanel); return true
-        case "[", ",": model.rotateCounterClockwiseForPanel(model.activePanel); return true
         case "w": model.activeTool = .windowLevel; return true
         case "v": model.activeTool = .select; return true
         case "p": model.activeTool = .pan; return true
         case "z": model.activeTool = .zoom; return true
-        case "h": model.flipHorizontalForPanel(model.activePanel); return true
         case " ":
             if let panel = model.activePanel, panel.isMultiFrame && panel.numberOfFrames > 1 {
                 model.toggleCinePlayback(panel); return true
@@ -80,10 +79,9 @@ struct WindowAccessor: NSViewRepresentable {
                 window.titlebarAppearsTransparent = true
                 window.styleMask.insert(.fullSizeContentView)
 
-                // Hide Traffic Lights
-                window.standardWindowButton(.closeButton)?.isHidden = true
-                window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-                window.standardWindowButton(.zoomButton)?.isHidden = true
+                window.standardWindowButton(.closeButton)?.isHidden = false
+                window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+                window.standardWindowButton(.zoomButton)?.isHidden = false
 
                 // Allow moving by dragging background
                 window.isMovableByWindowBackground = true
