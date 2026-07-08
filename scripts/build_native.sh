@@ -49,9 +49,9 @@ else
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.5.0</string>
+    <string>2.0</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>20</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>CFBundleDocumentTypes</key>
