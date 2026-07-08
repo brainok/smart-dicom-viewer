@@ -48,7 +48,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "OpenDicomViewer",
-            dependencies: ["DCMTKWrapper"]
+            dependencies: ["DCMTKWrapper"],
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
         ),
         .testTarget(
             name: "OpenDicomViewerTests",

@@ -40,6 +40,7 @@ private func makeSeriesDragProvider(index: Int, suggestedName: String? = nil) ->
 
 struct ContentView: View {
     @ObservedObject var model: DICOMModel
+    @ObservedObject var licenseManager: LicenseManager
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @FocusState private var isFocused: Bool
 
@@ -124,9 +125,21 @@ struct ContentView: View {
             }
         }
         // Keyboard Handlers — route through active panel
+        .disabled(licenseManager.requiresActivation)
+        .overlay {
+            if licenseManager.requiresActivation {
+                trialExpiredOverlay
+            }
+        }
         .focusable()
         .focused($isFocused)
-        .onAppear { isFocused = true }
+        .onAppear {
+            isFocused = true
+            licenseManager.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .licenseStateDidChange)) { _ in
+            isFocused = true
+        }
         .onKeyPress(.leftArrow) {
             if let panel = model.activePanel {
                 model.navigatePanelByOffset(panel, offset: -1)
@@ -215,6 +228,16 @@ struct ContentView: View {
         .sheet(isPresented: $model.showHelp) {
             HelpView()
         }
+        .sheet(isPresented: $model.showAbout) {
+            AboutView()
+        }
+        .sheet(isPresented: $licenseManager.showActivation) {
+            ActivationView(
+                licenseManager: licenseManager,
+                canDismiss: !licenseManager.requiresActivation
+            )
+            .interactiveDismissDisabled(licenseManager.requiresActivation)
+        }
         .sheet(isPresented: $model.showAnonymizeSheet) {
             AnonymizeFolderDialog(model: model)
         }
@@ -226,6 +249,31 @@ struct ContentView: View {
     }
 
     // MARK: - Handlers
+
+    private var trialExpiredOverlay: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "lock.circle")
+                .font(.system(size: 42))
+                .foregroundStyle(.orange)
+
+            Text("Activation Required")
+                .font(.title2.bold())
+
+            Text("The 30-day trial has ended. Activate with a Brainok license to keep using Smart DICOM Viewer.")
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 380)
+
+            Button("Activate License") {
+                licenseManager.showActivation = true
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(28)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .shadow(radius: 24)
+    }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         DropItemResolver.handle(

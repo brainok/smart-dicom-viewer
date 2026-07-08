@@ -66,10 +66,11 @@ struct OpenDicomViewerApp: App {
     @NSApplicationDelegateAdaptor(OpenDicomViewerAppDelegate.self) private var appDelegate
     @StateObject private var model = DICOMModel()
     @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var licenseManager = LicenseManager()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(model: model)
+            ContentView(model: model, licenseManager: licenseManager)
                 .onAppear {
                     appDelegate.openURLsHandler = { [weak model] urls in
                         guard let url = urls.first else { return }
@@ -102,9 +103,19 @@ struct OpenDicomViewerApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Smart DICOM Viewer") {
+                    model.showAbout = true
+                }
+            }
+
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates...") {
                     Task { await updateChecker.checkForUpdates(userInitiated: true) }
+                }
+
+                Button("Activate License...") {
+                    licenseManager.showActivation = true
                 }
             }
 
