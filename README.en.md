@@ -16,7 +16,7 @@ Smart DICOM Viewer is a native macOS DICOM viewer for fast image loading, multi-
 2. Open the DMG and drag `Smart DICOM Viewer.app` to `Applications`.
 3. Launch the app.
 
-The current distribution build is ad-hoc signed and is not notarized. If macOS blocks the first launch, Control-click or right-click the app in Finder, choose `Open`, then confirm `Open` again.
+The current distribution build is signed with Developer ID and notarized by Apple.
 
 ## License Activation
 

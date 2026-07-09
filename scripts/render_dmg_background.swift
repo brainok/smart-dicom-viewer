@@ -10,6 +10,7 @@ let appX: CGFloat = 250
 let applicationsX: CGFloat = 650
 let finderIconY: CGFloat = 330
 let arrowCenterY = height - finderIconY
+let finderIconSize: CGFloat = 160
 
 let image = NSImage(size: NSSize(width: width, height: height))
 image.lockFocus()
@@ -43,14 +44,14 @@ drawCentered(
     x: width / 2,
     y: height - 158,
     font: .systemFont(ofSize: 21, weight: .regular),
-    color: NSColor(white: 0.35, alpha: 1)
+    color: .black
 )
 
-let arrowStartX = appX + 115
-let arrowEndX = applicationsX - 120
-let shaftHeight: CGFloat = 24
-let headWidth: CGFloat = 58
-let headHeight: CGFloat = 72
+let arrowStartX = appX + finderIconSize / 2 + 42
+let arrowEndX = applicationsX - finderIconSize / 2 - 42
+let shaftHeight: CGFloat = 28
+let headWidth: CGFloat = 70
+let headHeight: CGFloat = 92
 let shaftEndX = arrowEndX - headWidth
 
 NSColor.black.setFill()

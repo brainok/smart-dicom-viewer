@@ -16,7 +16,7 @@ Smart DICOM Viewer는 macOS용 네이티브 DICOM 뷰어입니다. 빠른 DICOM 
 2. DMG를 열고 `Smart DICOM Viewer.app`을 `Applications` 폴더로 드래그합니다.
 3. 앱을 실행합니다.
 
-현재 배포본은 notarization이 적용되지 않은 ad-hoc 서명 빌드입니다. macOS가 첫 실행을 막을 수 있으며, 이 경우 Finder에서 앱을 Control-클릭 또는 우클릭한 뒤 `열기`를 선택하고 다시 `열기`를 누르세요.
+현재 배포본은 Developer ID로 서명되고 Apple notarization이 완료된 빌드입니다.
 
 ## 라이선스 활성화
 
