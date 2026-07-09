@@ -110,50 +110,6 @@ Requirements:
 - Xcode 15 or later, or Swift 5.9 or later
 - Apple Silicon Mac, arm64 build target
 
-Build:
-
-```bash
-swift build
-```
-
-Test:
-
-```bash
-swift test
-```
-
-Package the app and DMG:
-
-```bash
-./scripts/package_app.sh
-```
-
-Notarized packaging requires an `OpenDicomViewer` notarytool profile in Keychain.
-
-```bash
-./scripts/package_app.sh --notarize
-```
-
-## Architecture
-
-```text
-Sources/
-  OpenDicomViewer/
-    App.swift
-    ContentView.swift
-    DICOMModel.swift
-    SimpleDICOM.swift
-    MultiPanelContainer.swift
-    PanelState.swift
-    MPREngine.swift
-    MetalVolumeRenderer.swift
-    LicenseManager.swift
-    HelpView.swift
-    TagView.swift
-  DCMTKWrapper/
-    DCMTKHelper.mm
-    include/DCMTKHelper.h
-```
 
 Core pieces:
 
@@ -172,7 +128,7 @@ DCMTK is licensed under the BSD license. OpenJPEG is licensed under BSD-2-Clause
 
 ## About
 
-This application is a fork of the open-source DICOM Web Viewer (DWV) project developed by Ivan Martel. The original source code is available at  DWV GitHub Repository⁠￼. The application has been extensively customized and enhanced by Prof. Jun-Nyeong Heo, Yonsei University College of Medicine, to support additional features and workflows for research and clinical use.  
+This application is a fork of the open-source DICOM Web Viewer (DWV) project developed by Ivan Martel. The original source code is available at  DWV GitHub Repository⁠￼. The application has been extensively customized and enhanced by Prof. JoonNyung Heo, Yonsei University College of Medicine, to support additional features and workflows for research and clinical use.  
 
 https://github.com/ivmartel/dwv
 

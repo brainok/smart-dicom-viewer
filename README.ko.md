@@ -110,29 +110,7 @@ Smart DICOM Viewer는 macOS용 네이티브 DICOM 뷰어입니다. 빠른 DICOM 
 - Xcode 15 이상 또는 Swift 5.9 이상
 - Apple Silicon Mac, arm64 빌드 기준
 
-빌드:
 
-```bash
-swift build
-```
-
-테스트:
-
-```bash
-swift test
-```
-
-앱과 DMG 패키징:
-
-```bash
-./scripts/package_app.sh
-```
-
-notarization까지 포함하려면 Keychain에 `OpenDicomViewer` notarytool 프로필이 필요합니다.
-
-```bash
-./scripts/package_app.sh --notarize
-```
 
 ## 구조
 
