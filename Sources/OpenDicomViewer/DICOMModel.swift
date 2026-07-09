@@ -445,6 +445,11 @@ class DICOMModel: ObservableObject {
         _volumeCache[key] = value
         volumeCacheLock.unlock()
     }
+    private func volumeCacheRemoveAll() {
+        volumeCacheLock.lock()
+        _volumeCache.removeAll()
+        volumeCacheLock.unlock()
+    }
     /// Background queue for volume building
     private let volumeBuildQueue: OperationQueue = {
         let q = OperationQueue()
@@ -902,25 +907,44 @@ class DICOMModel: ObservableObject {
     }
 
     func load(url: URL) {
+        let requestID = UUID()
         let secured = url.startAccessingSecurityScopedResource()
-        defer { if secured { url.stopAccessingSecurityScopedResource() } }
 
         BenchmarkLogger.shared.start("load_total")
         BenchmarkLogger.shared.log(event: "load_start", dataset: url.lastPathComponent, detail: url.path)
 
         // Cancel any pending background work
         cachingQueue.cancelAllOperations()
+        loadingQueue.cancelAllOperations()
+        precachingQueue.cancelAllOperations()
+        thumbnailQueue.cancelAllOperations()
+        volumeBuildQueue.cancelAllOperations()
         
         DispatchQueue.main.async {
+            self.currentLoadRequestID = requestID
+            self.lastPrecachedSeriesIndex = -1
+            self.currentCachingSeriesUID = nil
+            self.volumeCacheRemoveAll()
+            self.decoderLock.lock()
+            self.multiFrameDecoders.removeAll()
+            self.decodersInFlight.removeAll()
+            self.decoderLock.unlock()
+            for panel in self.panels {
+                self.stopCinePlayback(panel)
+                panel.loadingQueue.cancelAllOperations()
+            }
+
             // Reset State completely
             self.errorMessage = nil
             self.isLoading = true
+            self.isScanning = false
             self.image = nil
             self.rawPixelData = nil
             self.allSeries = []
             self.derivedObjects = []
             self.annotationObjects = []
             self.selectedDerivedObjectID = nil
+            self.seriesStates.removeAll()
             self.layout = .single
             self.isSplitComparisonMode = false
             self.fullscreenPanelID = nil
@@ -940,17 +964,18 @@ class DICOMModel: ObservableObject {
                 if isDirectory.boolValue {
                     // Directory: Background scan
                     self.isScanning = true
-                    self.scanDirectory(url)
+                    self.scanDirectory(url, requestID: requestID, securityScopedURL: secured ? url : nil)
                 } else {
                     // File: Load immediately, then scan parent for context
                     self.loadSingleFile(url)
                     let parent = url.deletingLastPathComponent()
                     self.isScanning = true
-                    self.scanDirectory(parent, selecting: url)
+                    self.scanDirectory(parent, selecting: url, requestID: requestID, securityScopedURL: secured ? url : nil)
                 }
             } else {
                  self.errorMessage = "File not accessible or does not exist."
                  self.isLoading = false
+                 if secured { url.stopAccessingSecurityScopedResource() }
              }
         }
     }
@@ -2199,13 +2224,27 @@ class DICOMModel: ObservableObject {
 
 
     // MARK: - Directory
-    private func scanDirectory(_ url: URL, selecting targetUrl: URL? = nil) {
+    private func scanDirectory(
+        _ url: URL,
+        selecting targetUrl: URL? = nil,
+        requestID: UUID,
+        securityScopedURL: URL? = nil
+    ) {
         BenchmarkLogger.shared.start("scan_directory")
         let benchDataset = url.lastPathComponent
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            defer { securityScopedURL?.stopAccessingSecurityScopedResource() }
             let fileManager = FileManager.default
-            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+                DispatchQueue.main.async {
+                    guard self.currentLoadRequestID == requestID else { return }
+                    self.errorMessage = "Folder is not accessible."
+                    self.isLoading = false
+                    self.isScanning = false
+                }
+                return
+            }
             var contexts: [DicomImageContext] = []
             var derivedObjects: [DICOMDerivedObjectSummary] = []
             var annotationObjects: [DICOMAnnotationObject] = []
@@ -2242,6 +2281,7 @@ class DICOMModel: ObservableObject {
                 seriesList.sort { self.seriesSortPrecedes($0, $1) }
                 
                 DispatchQueue.main.async {
+                    guard self.currentLoadRequestID == requestID else { return }
                     // Capture current selection UID before replacing list
                     let currentUID = (self.currentSeriesIndex >= 0 && self.currentSeriesIndex < self.allSeries.count) ? self.allSeries[self.currentSeriesIndex].id : nil
                     let currentImgURL = (self.currentSeriesIndex >= 0 && self.currentSeriesIndex < self.allSeries.count && self.currentImageIndex >= 0 && self.currentImageIndex < self.allSeries[self.currentSeriesIndex].images.count) ? self.allSeries[self.currentSeriesIndex].images[self.currentImageIndex].url : nil
@@ -2356,6 +2396,7 @@ class DICOMModel: ObservableObject {
                         BenchmarkLogger.shared.stop("first_image_found", dataset: benchDataset, detail: "First DICOM file parsed")
                         BenchmarkLogger.shared.start("first_image_display")
                         DispatchQueue.main.async {
+                            guard self.currentLoadRequestID == requestID else { return }
                             // Only set if we are still empty (avoid race conditions)
                             if self.allSeries.isEmpty {
                                 let tempDesc = context.displaySeriesDescription(baseDescription: context.seriesDescription)
@@ -2406,6 +2447,7 @@ class DICOMModel: ObservableObject {
             // Auto-assign series to panels when in multi-panel mode
             if self.panels.count > 1 {
                 DispatchQueue.main.async {
+                    guard self.currentLoadRequestID == requestID else { return }
                     self.autoAssignSeriesToPanels()
                 }
             }

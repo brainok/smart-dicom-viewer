@@ -47,7 +47,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(model: model, columnVisibility: $columnVisibility)
-            .navigationSplitViewColumnWidth(min: 320, ideal: 340, max: 760)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 330, max: 520)
             .toolbar(removing: .sidebarToggle)
         } detail: {
             HStack(spacing: 0) {
@@ -436,6 +436,7 @@ struct SidebarView: View {
                 SeriesListView(model: model, selectedStudyID: $selectedStudyID)
                     .frame(width: seriesColumnWidth)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
     
@@ -1028,28 +1029,34 @@ struct SeriesListView: View {
         }
     }
 
+    @ViewBuilder
     private func seriesCell(for index: Int) -> some View {
-        SeriesRow(
-            model: model,
-            series: model.allSeries[index],
-            isSelected: index == activeSeriesIndex,
-            seriesIndex: index,
-            thumbnailSize: CGFloat(seriesThumbnailSize)
-        )
-        .contentShape(Rectangle())
-        .onDrag { makeSeriesDragProvider(index: index, suggestedName: model.allSeries[index].seriesDescription) }
-        .onTapGesture {
-            selectSeries(index)
+        if let series = model.allSeries[safe: index] {
+            SeriesRow(
+                model: model,
+                series: series,
+                isSelected: index == activeSeriesIndex,
+                seriesIndex: index,
+                thumbnailSize: CGFloat(seriesThumbnailSize)
+            )
+            .contentShape(Rectangle())
+            .onDrag { makeSeriesDragProvider(index: index, suggestedName: series.seriesDescription) }
+            .onTapGesture {
+                selectSeries(index)
+            }
+        } else {
+            EmptyView()
         }
     }
 
     private func selectSeries(_ index: Int) {
+        guard let series = model.allSeries[safe: index] else { return }
         model.currentImageIndex = 0
         model.currentSeriesIndex = index
         model.clearSelectedDerivedObject()
         if let panel = model.activePanel {
             model.assignSeriesToPanel(panel, seriesIndex: index)
-        } else if let first = model.allSeries[index].images.first {
+        } else if let first = series.images.first {
             model.loadSingleFile(first.url)
         }
     }

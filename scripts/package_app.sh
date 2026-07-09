@@ -7,7 +7,7 @@ set -e
 
 EXECUTABLE_NAME="OpenDicomViewer"
 APP_NAME="Smart DICOM Viewer"
-RELEASE_DIR="release/v2.01"
+RELEASE_DIR="release/v2.02"
 SIGNING_IDENTITY="Developer ID Application: HYO SUK NAM (FC724Q48DM)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
@@ -59,9 +59,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.01</string>
+    <string>2.02</string>
     <key>CFBundleVersion</key>
-    <string>201</string>
+    <string>202</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>CFBundleIconFile</key>

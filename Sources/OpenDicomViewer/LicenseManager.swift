@@ -50,6 +50,7 @@ final class LicenseManager: ObservableObject {
     private static let activationURL = URL(string: "https://asia-northeast3-braionk-lab.cloudfunctions.net/activateBrainokLicense")!
     private static let trialDays = 30
     private static let firstLaunchKey = "brainok.firstLaunchDate"
+    nonisolated private static let deviceIdCacheKey = "brainok.deviceIdCache"
     private static let supportEmail = "brainok777@gmail.com"
     private static let legacyOfflineCodes: Set<String> = [
         "BRAINOK-SEVERANCE-2026",
@@ -61,6 +62,7 @@ final class LicenseManager: ObservableObject {
     @Published var showActivation = false
     @Published var activationError: String?
     @Published var isActivating = false
+    private var refreshTask: Task<Void, Never>?
 
     var isActivated: Bool {
         if case .activated = status { return true }
@@ -86,24 +88,45 @@ final class LicenseManager: ObservableObject {
     }
 
     init() {
-        deviceId = Self.loadOrCreateDeviceId()
+        deviceId = UserDefaults.standard.string(forKey: Self.deviceIdCacheKey) ?? ""
         ensureFirstLaunchDate()
         refresh()
     }
 
     func refresh() {
-        if let payload = Self.loadActivationPayload(), payload.deviceId == deviceId {
-            status = .activated(plan: payload.plan)
-            return
-        }
-
-        let firstLaunch = UserDefaults.standard.object(forKey: Self.firstLaunchKey) as? Date ?? Date()
-        let elapsedDays = Calendar.current.dateComponents([.day], from: firstLaunch, to: Date()).day ?? 0
-        let remaining = max(0, Self.trialDays - elapsedDays)
-        status = remaining > 0 ? .trial(daysRemaining: remaining) : .expired
+        status = Self.currentTrialStatus()
         if status == .expired {
             showActivation = true
         }
+
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            let (resolvedDeviceId, payload) = await Task.detached(priority: .utility) {
+                (Self.loadOrCreateDeviceId(), Self.loadActivationPayload())
+            }.value
+
+            guard let self, !Task.isCancelled else { return }
+            self.deviceId = resolvedDeviceId
+            UserDefaults.standard.set(resolvedDeviceId, forKey: Self.deviceIdCacheKey)
+
+            if let payload, payload.deviceId == resolvedDeviceId {
+                self.status = .activated(plan: payload.plan)
+                self.showActivation = false
+                return
+            }
+
+            self.status = Self.currentTrialStatus()
+            if self.status == .expired {
+                self.showActivation = true
+            }
+        }
+    }
+
+    private static func currentTrialStatus() -> LicenseStatus {
+        let firstLaunch = UserDefaults.standard.object(forKey: Self.firstLaunchKey) as? Date ?? Date()
+        let elapsedDays = Calendar.current.dateComponents([.day], from: firstLaunch, to: Date()).day ?? 0
+        let remaining = max(0, Self.trialDays - elapsedDays)
+        return remaining > 0 ? .trial(daysRemaining: remaining) : .expired
     }
 
     func activate(code rawCode: String) async {
@@ -116,6 +139,7 @@ final class LicenseManager: ObservableObject {
         activationError = nil
         isActivating = true
         defer { isActivating = false }
+        await resolveDeviceIdIfNeeded()
 
         if activateExistingOfflineCode(code) {
             publishLicenseStateChangeOnMainThread()
@@ -241,6 +265,15 @@ final class LicenseManager: ObservableObject {
         UserDefaults.standard.set(Date(), forKey: Self.firstLaunchKey)
     }
 
+    private func resolveDeviceIdIfNeeded() async {
+        guard deviceId.isEmpty else { return }
+        let resolved = await Task.detached(priority: .utility) {
+            Self.loadOrCreateDeviceId()
+        }.value
+        deviceId = resolved
+        UserDefaults.standard.set(resolved, forKey: Self.deviceIdCacheKey)
+    }
+
     private static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
     }
@@ -253,10 +286,11 @@ final class LicenseManager: ObservableObject {
             .uppercased()
     }
 
-    private static func loadOrCreateDeviceId() -> String {
+    nonisolated private static func loadOrCreateDeviceId() -> String {
         if let data = Keychain.read(account: "device-id"),
            let value = String(data: data, encoding: .utf8),
            !value.isEmpty {
+            UserDefaults.standard.set(value, forKey: deviceIdCacheKey)
             return value
         }
 
@@ -265,15 +299,16 @@ final class LicenseManager: ObservableObject {
             .prefix(12)
             .uppercased())
         try? Keychain.save(Data(value.utf8), account: "device-id")
+        UserDefaults.standard.set(value, forKey: deviceIdCacheKey)
         return value
     }
 
-    private static func loadActivationPayload() -> BrainokActivationPayload? {
+    nonisolated private static func loadActivationPayload() -> BrainokActivationPayload? {
         guard let data = Keychain.read(account: "activation-payload") else { return nil }
         return try? JSONDecoder().decode(BrainokActivationPayload.self, from: data)
     }
 
-    private static func saveActivationPayload(_ payload: BrainokActivationPayload) throws {
+    nonisolated private static func saveActivationPayload(_ payload: BrainokActivationPayload) throws {
         let data = try JSONEncoder().encode(payload)
         try Keychain.save(data, account: "activation-payload")
     }
