@@ -42,6 +42,15 @@ static void ensureDCMTKInitialized(void) {
     // Set DCMDICTPATH to the bundled dicom.dic
     NSBundle *mainBundle = [NSBundle mainBundle];
     NSString *dicPath = [mainBundle pathForResource:@"dicom" ofType:@"dic"];
+    if (!dicPath) {
+      NSString *repoDicPath =
+          [[[NSFileManager defaultManager] currentDirectoryPath]
+              stringByAppendingPathComponent:
+                  @"libs/dcmtk/share/dcmtk-3.6.8/dicom.dic"];
+      if ([[NSFileManager defaultManager] fileExistsAtPath:repoDicPath]) {
+        dicPath = repoDicPath;
+      }
+    }
 
     if (dicPath) {
       setenv("DCMDICTPATH", [dicPath UTF8String], 1);
@@ -61,6 +70,74 @@ static void ensureDCMTKInitialized(void) {
 
 + (void)initialize {
   ensureDCMTKInitialized();
+}
+
++ (NSInteger)anonymizeDICOMAtPath:(NSString *)sourcePath
+                            toPath:(NSString *)destinationPath
+                       patientName:(NSString *)patientName
+                         patientID:(NSString *)patientID {
+  if (!sourcePath || !destinationPath)
+    return -1;
+
+  ensureDCMTKInitialized();
+
+  DcmFileFormat fileformat;
+  OFCondition status =
+      fileformat.loadFile([sourcePath UTF8String], EXS_Unknown, EGL_noChange,
+                          DCM_MaxReadLength, ERM_autoDetect);
+  if (status.bad()) {
+    return 0;
+  }
+
+  DcmDataset *dataset = fileformat.getDataset();
+  if (!dataset)
+    return -1;
+
+  NSString *safeName = patientName.length > 0 ? patientName : @"ANONYMIZED";
+  NSString *safeID = patientID.length > 0 ? patientID : @"000000";
+
+  // Remove stale nested copies first. Some viewers group imports from any
+  // matching Patient tags they encounter, not only the top-level dataset tags.
+  dataset->findAndDeleteElement(DCM_PatientName, OFTrue, OFTrue);
+  dataset->findAndDeleteElement(DCM_PatientID, OFTrue, OFTrue);
+  dataset->findAndDeleteElement(DCM_OtherPatientNames, OFTrue, OFTrue);
+  dataset->findAndDeleteElement(DCM_OtherPatientIDsSequence, OFTrue, OFTrue);
+  dataset->findAndDeleteElement(DCM_PatientBirthName, OFTrue, OFTrue);
+
+  status =
+      dataset->putAndInsertString(DCM_PatientName, [safeName UTF8String], OFTrue);
+  if (status.bad()) {
+    NSLog(@"[DCMTKHelper] Failed to set PatientName for %@: %s", sourcePath,
+          status.text());
+    return -1;
+  }
+
+  status = dataset->putAndInsertString(DCM_PatientID, [safeID UTF8String], OFTrue);
+  if (status.bad()) {
+    NSLog(@"[DCMTKHelper] Failed to set PatientID for %@: %s", sourcePath,
+          status.text());
+    return -1;
+  }
+
+  dataset->putAndInsertString(DCM_PatientIdentityRemoved, "YES", OFTrue);
+  dataset->putAndInsertString(DCM_DeidentificationMethod,
+                              "OpenDicomViewer DCMTK anonymizer", OFTrue);
+
+  E_TransferSyntax xfer = dataset->getOriginalXfer();
+  if (xfer == EXS_Unknown) {
+    xfer = EXS_LittleEndianExplicit;
+  }
+
+  status = fileformat.saveFile([destinationPath UTF8String], xfer,
+                               EET_UndefinedLength, EGL_recalcGL, EPD_noChange,
+                               0, 0, EWM_updateMeta);
+  if (status.bad()) {
+    NSLog(@"[DCMTKHelper] Failed to save anonymized DICOM %@ -> %@: %s",
+          sourcePath, destinationPath, status.text());
+    return -1;
+  }
+
+  return 1;
 }
 
 + (NSImage *)convertDICOMToNSImage:(NSString *)path {

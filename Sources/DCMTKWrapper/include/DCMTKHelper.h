@@ -13,6 +13,11 @@
 @interface DCMTKHelper : NSObject
 
 + (NSImage *)convertDICOMToNSImage:(NSString *)path;
++ (NSInteger)anonymizeDICOMAtPath:(NSString *)sourcePath
+                            toPath:(NSString *)destinationPath
+                       patientName:(NSString *)patientName
+                         patientID:(NSString *)patientID
+    NS_SWIFT_NAME(anonymizeDICOM(atPath:toPath:patientName:patientID:));
 + (NSData *)getRawPixelData:(NSString *)path
                       width:(NSInteger *)width
                      height:(NSInteger *)height

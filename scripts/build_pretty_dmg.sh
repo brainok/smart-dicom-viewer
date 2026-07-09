@@ -4,10 +4,10 @@ set -euo pipefail
 
 EXECUTABLE_NAME="OpenDicomViewer"
 APP_NAME="Smart DICOM Viewer"
-VERSION="v2.02"
+VERSION="v2.03"
 APP_BUNDLE="${APP_NAME}.app"
-RELEASE_DIR="release/${VERSION}"
-DMG_NAME="${APP_NAME} v2.0.dmg"
+RELEASE_DIR="Release/${VERSION}"
+DMG_NAME="Smart-DICOM-Viewer.dmg"
 DMG_PATH="${RELEASE_DIR}/${DMG_NAME}"
 STAGING_DIR="build/dmg-staging"
 ASSETS_DIR="build/dmg-assets"
@@ -51,9 +51,9 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.02</string>
+    <string>2.03</string>
     <key>CFBundleVersion</key>
-    <string>202</string>
+    <string>203</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>CFBundleIconFile</key>

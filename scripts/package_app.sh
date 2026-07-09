@@ -7,7 +7,7 @@ set -e
 
 EXECUTABLE_NAME="OpenDicomViewer"
 APP_NAME="Smart DICOM Viewer"
-RELEASE_DIR="release/v2.02"
+RELEASE_DIR="Release/v2.03"
 SIGNING_IDENTITY="Developer ID Application: HYO SUK NAM (FC724Q48DM)"
 NOTARY_PROFILE="OpenDicomViewer"
 NOTARIZE=false
@@ -59,9 +59,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.02</string>
+    <string>2.03</string>
     <key>CFBundleVersion</key>
-    <string>202</string>
+    <string>203</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>CFBundleIconFile</key>
@@ -122,7 +122,7 @@ echo "Successfully created ${APP_BUNDLE}"
 
 # --- Create DMG for distribution ---
 mkdir -p "${RELEASE_DIR}"
-DMG_NAME="${RELEASE_DIR}/${APP_NAME}.dmg"
+DMG_NAME="${RELEASE_DIR}/Smart-DICOM-Viewer.dmg"
 DMG_TEMP="dmg_tmp"
 
 echo "Creating DMG at ${DMG_NAME}..."
