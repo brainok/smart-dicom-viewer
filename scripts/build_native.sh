@@ -54,6 +54,11 @@ else
     <string>202</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

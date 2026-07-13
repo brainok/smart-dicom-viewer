@@ -70,6 +70,7 @@ private class KeyInterceptorView: NSView {
 
 struct WindowAccessor: NSViewRepresentable {
     let model: DICOMModel
+    private static let didSetInitialWindowFrameKey = "SmartDICOMViewer.didSetInitialWindowFrame.v1"
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -85,6 +86,8 @@ struct WindowAccessor: NSViewRepresentable {
 
                 // Allow moving by dragging background
                 window.isMovableByWindowBackground = true
+                window.minSize = NSSize(width: 980, height: 640)
+                setInitialWindowFrameIfNeeded(window)
 
                 // Install key interceptor for IME-independent shortcuts
                 if let contentView = window.contentView {
@@ -100,5 +103,22 @@ struct WindowAccessor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+    }
+
+    private func setInitialWindowFrameIfNeeded(_ window: NSWindow) {
+        guard !UserDefaults.standard.bool(forKey: Self.didSetInitialWindowFrameKey) else { return }
+        let screen = window.screen ?? NSScreen.main
+        guard let visibleFrame = screen?.visibleFrame else { return }
+
+        let targetWidth = min(max(visibleFrame.width * 0.78, 1180), 1480)
+        let targetHeight = min(max(visibleFrame.height * 0.78, 760), 980)
+        let width = min(targetWidth, visibleFrame.width - 48)
+        let height = min(targetHeight, visibleFrame.height - 48)
+        let originX = visibleFrame.midX - width / 2
+        let originY = visibleFrame.midY - height / 2
+        let frame = NSRect(x: originX, y: originY, width: width, height: height)
+
+        window.setFrame(frame, display: true)
+        UserDefaults.standard.set(true, forKey: Self.didSetInitialWindowFrameKey)
     }
 }

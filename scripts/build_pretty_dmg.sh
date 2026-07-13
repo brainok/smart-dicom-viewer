@@ -56,6 +56,11 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<EOF
     <string>203</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleDocumentTypes</key>

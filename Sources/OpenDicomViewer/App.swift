@@ -125,6 +125,11 @@ struct OpenDicomViewerApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
+                Button("Connect to Orthanc...") {
+                    model.openOrthancBrowser()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+
                 Button("Anonymize Folder...") {
                     model.anonymizeFolder()
                 }

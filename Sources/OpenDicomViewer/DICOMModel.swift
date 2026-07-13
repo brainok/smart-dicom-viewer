@@ -295,8 +295,15 @@ class DICOMModel: ObservableObject {
     @Published var showHelp: Bool = false
     @Published var showAnonymizeSheet: Bool = false
     @Published var showPresetEditor: Bool = false
+    @Published var showOrthancBrowser: Bool = false
     @Published var isAnonymizing: Bool = false
     @Published var anonymizeResultMessage: String?
+    @Published var orthancStudies: [OrthancStudy] = []
+    @Published var orthancErrorMessage: String?
+    @Published var isOrthancFetching: Bool = false
+    @Published var isOrthancDownloading: Bool = false
+    @Published var orthancDownloadProgress: Double = 0
+    @Published var orthancDownloadStatus: String = ""
     @Published var isSplitComparisonMode: Bool = false
     @Published var windowLevelPresets: [WindowLevelPreset] = WindowLevelPreset.defaultPresets
     @Published var synchronizedScrolling: Bool = false {
@@ -880,6 +887,54 @@ class DICOMModel: ObservableObject {
     func anonymizeFolder() {
         anonymizeResultMessage = nil
         showAnonymizeSheet = true
+    }
+
+    func openOrthancBrowser() {
+        orthancErrorMessage = nil
+        showOrthancBrowser = true
+    }
+
+    @MainActor
+    func refreshOrthancStudies(connection: OrthancConnection) async {
+        isOrthancFetching = true
+        orthancErrorMessage = nil
+        defer { isOrthancFetching = false }
+
+        do {
+            let client = OrthancClient(connection: connection)
+            orthancStudies = try await client.fetchStudies()
+            if orthancStudies.isEmpty {
+                orthancErrorMessage = "Connected, but no studies were found."
+            }
+        } catch {
+            orthancErrorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    func downloadAndOpenOrthancStudy(_ study: OrthancStudy, connection: OrthancConnection) async {
+        isOrthancDownloading = true
+        orthancDownloadProgress = 0
+        orthancDownloadStatus = "Preparing download..."
+        orthancErrorMessage = nil
+        defer {
+            isOrthancDownloading = false
+            orthancDownloadStatus = ""
+        }
+
+        do {
+            let client = OrthancClient(connection: connection)
+            let directory = try await client.downloadStudy(study) { [weak self] progress, status in
+                self?.orthancDownloadProgress = progress
+                self?.orthancDownloadStatus = status
+            }
+            showOrthancBrowser = false
+            load(url: directory)
+        } catch is CancellationError {
+            orthancErrorMessage = "Download cancelled."
+        } catch {
+            orthancErrorMessage = error.localizedDescription
+        }
     }
 
     func runAnonymize(sourceURL: URL, destinationURL: URL, patientName: String, patientID: String) {

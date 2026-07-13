@@ -244,6 +244,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showPresetEditor) {
             WindowLevelPresetEditor(model: model)
         }
+        .sheet(isPresented: $model.showOrthancBrowser) {
+            OrthancBrowserDialog(model: model)
+        }
         .preferredColorScheme(.dark)
         .background(WindowAccessor(model: model))
     }
@@ -390,6 +393,14 @@ struct SidebarView: View {
                 .help(isStudyColumnCollapsed ? "Show Study Column" : "Collapse Study Column")
                 
                 Spacer()
+
+                Button(action: { model.openOrthancBrowser() }) {
+                    Image(systemName: "network")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Connect to Orthanc Server")
 
                 Button(action: { model.anonymizeFolder() }) {
                     Image(systemName: "person.crop.circle.badge.minus")
@@ -584,6 +595,283 @@ struct AnonymizeFolderDialog: View {
         if panel.runModal() == .OK {
             destinationURL = panel.url
         }
+    }
+}
+
+struct OrthancBrowserDialog: View {
+    @ObservedObject var model: DICOMModel
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("orthancServerAddress") private var serverAddress = "http://localhost:8042"
+    @AppStorage("orthancUsername") private var username = ""
+    @State private var password = ""
+    @State private var savePassword = false
+    @State private var showPassword = false
+    @State private var searchText = ""
+    @State private var selectedStudyID: String?
+
+    private var selectedStudy: OrthancStudy? {
+        model.orthancStudies.first(where: { $0.id == selectedStudyID })
+    }
+
+    private var filteredStudies: [OrthancStudy] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return model.orthancStudies }
+        return model.orthancStudies.filter {
+            $0.displayTitle.localizedCaseInsensitiveContains(query) ||
+            $0.displaySubtitle.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var canRunRequest: Bool {
+        !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !model.isOrthancFetching &&
+        !model.isOrthancDownloading
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+
+            VStack(spacing: 14) {
+                connectionFields
+                toolbar
+                studyList
+                statusBar
+            }
+            .padding(18)
+        }
+        .frame(width: 760, height: 620)
+        .background(Color(white: 0.11))
+        .onAppear {
+            loadSavedPassword()
+            if model.orthancStudies.isEmpty && canRunRequest {
+                refresh()
+            }
+        }
+        .onChange(of: serverAddress) { _, _ in
+            loadSavedPassword()
+        }
+        .onChange(of: username) { _, _ in
+            loadSavedPassword()
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 14) {
+            Circle().fill(Color.red).frame(width: 14, height: 14)
+            Circle().fill(Color.yellow).frame(width: 14, height: 14)
+            Circle().fill(Color.green).frame(width: 14, height: 14)
+
+            Label("Orthanc Server", systemImage: "network")
+                .font(.system(size: 22, weight: .bold))
+
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(Color(white: 0.13))
+    }
+
+    private var connectionFields: some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+            GridRow {
+                Text("Address")
+                    .foregroundStyle(.secondary)
+                TextField("http://192.168.0.10:8042", text: $serverAddress)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            GridRow {
+                Text("User")
+                    .foregroundStyle(.secondary)
+                TextField("Optional", text: $username)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            GridRow {
+                Text("Password")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Group {
+                        if showPassword {
+                            TextField("Optional", text: $password)
+                        } else {
+                            SecureField("Optional", text: $password)
+                        }
+                    }
+                    .textFieldStyle(.roundedBorder)
+
+                    Button {
+                        showPassword.toggle()
+                    } label: {
+                        Image(systemName: showPassword ? "eye.slash" : "eye")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showPassword ? "Hide Password" : "Show Password")
+
+                    Toggle("Save", isOn: $savePassword)
+                        .toggleStyle(.checkbox)
+                        .frame(width: 70, alignment: .leading)
+                        .help("Save this password in Keychain")
+
+                    Button {
+                        forgetSavedPassword()
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Forget Saved Password")
+                    .disabled(!savePassword && password.isEmpty)
+                }
+            }
+        }
+        .font(.system(size: 13, weight: .semibold))
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            TextField("Search studies", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+
+            Button(action: refresh) {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .disabled(!canRunRequest)
+
+            Button(action: openSelectedStudy) {
+                Label("Open", systemImage: "square.and.arrow.down")
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(selectedStudy == nil || !canRunRequest)
+        }
+    }
+
+    private var studyList: some View {
+        List(filteredStudies, selection: $selectedStudyID) { study in
+            VStack(alignment: .leading, spacing: 4) {
+                Text(study.displayTitle)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+
+                Text(study.displaySubtitle)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.vertical, 5)
+            .tag(study.id)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                selectedStudyID = study.id
+                openSelectedStudy()
+            }
+        }
+        .overlay {
+            if model.isOrthancFetching {
+                ProgressView("Loading Studies...")
+                    .controlSize(.regular)
+            } else if filteredStudies.isEmpty {
+                ContentUnavailableView("No Studies", systemImage: "externaldrive.badge.questionmark")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusBar: some View {
+        if model.isOrthancDownloading {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: model.orthancDownloadProgress)
+                Text(model.orthancDownloadStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            HStack {
+                if let message = model.orthancErrorMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                } else {
+                    Text("\(model.orthancStudies.count) Studies")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+    }
+
+    private func refresh() {
+        Task {
+            do {
+                let connection = try makeConnection()
+                await model.refreshOrthancStudies(connection: connection)
+                if selectedStudyID == nil {
+                    selectedStudyID = model.orthancStudies.first?.id
+                }
+            } catch {
+                model.orthancErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func openSelectedStudy() {
+        guard let selectedStudy else { return }
+        Task {
+            do {
+                let connection = try makeConnection()
+                await model.downloadAndOpenOrthancStudy(selectedStudy, connection: connection)
+            } catch {
+                model.orthancErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func makeConnection() throws -> OrthancConnection {
+        try persistPasswordPreference()
+        return try OrthancConnection.make(
+            serverAddress: serverAddress,
+            username: username,
+            password: password
+        )
+    }
+
+    private func loadSavedPassword() {
+        let saved = OrthancCredentialStore.password(for: serverAddress, username: username)
+        guard !saved.isEmpty else {
+            if savePassword {
+                password = ""
+                savePassword = false
+            }
+            return
+        }
+        password = saved
+        savePassword = true
+    }
+
+    private func persistPasswordPreference() throws {
+        if savePassword {
+            if !password.isEmpty {
+                try OrthancCredentialStore.save(password: password, serverAddress: serverAddress, username: username)
+            }
+        } else {
+            OrthancCredentialStore.delete(serverAddress: serverAddress, username: username)
+        }
+    }
+
+    private func forgetSavedPassword() {
+        OrthancCredentialStore.delete(serverAddress: serverAddress, username: username)
+        password = ""
+        savePassword = false
     }
 }
 
